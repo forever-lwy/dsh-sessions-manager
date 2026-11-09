@@ -1,3 +1,9 @@
+> **这是 [TOBYCAI/dsh-sessions-manager](https://github.com/TOBYCAI/dsh-sessions-manager) 的 fork**，包名为 `@forever-lwy/dsh-sessions-manager`，安装来源为 `github:forever-lwy/dsh-sessions-manager`（默认分支 `release` 存放预构建版本）。版本号为上游 `x.y.(patch×100+N)`，例如 3.7.1001 基于上游 3.7.10。与上游的差异：
+>
+> - 侧栏的四个整页 MutationObserver 合并为一个共享 DOM hub（`src/client/dom-hub.js`）。整页只观察节点增删，属性和文本只在会话树内观察，流式回复不再唤醒侧栏重绘。
+> - 修复 DSH 0.2.2 会话「⋯」菜单与右键菜单中缺少「删除 / 移动到… / 标记未读」的问题：菜单 portal 后已无法从 fiber 链读到会话，改为记录打开菜单的那一行。
+> - 发版：`main` 存放源码（沿用上游，`lib/` 也入库）；推送 `v<版本>` 标签后由 GitHub Actions 构建、测试并写入 `release` 分支。上游的 compat、npm publish 工作流已移除。
+
 # dsh-sessions-manager
 
 > **可能是目前最稳定、体验最好的 DSH 会话管理插件。**

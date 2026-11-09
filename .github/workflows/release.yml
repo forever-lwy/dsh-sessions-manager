@@ -1,0 +1,55 @@
+# Runs only when a v<version> tag is pushed; pushes to master trigger nothing.
+# It builds and tests the tagged master commit, then scripts/release.mjs adds
+# the next commit to the `release` branch: the same tree plus the built lib/,
+# with `prepare` removed, whose parents are the previous release commit and
+# the tagged commit. `release` is the default branch, so
+# github:<owner>/<repo> installs the latest release without devDependencies
+# or a build.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Check the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      # npm ci runs `prepare`; release.mjs rebuilds lib/ from scratch anyway.
+      - run: npm ci
+
+      - name: Build, test and create the release commit
+        run: |
+          if git ls-remote --exit-code --heads origin release >/dev/null; then
+            git fetch --no-tags origin release:release
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          node scripts/release.mjs
+
+      - name: Push the release branch
+        run: git push origin refs/heads/release

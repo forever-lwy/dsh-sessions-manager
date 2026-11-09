@@ -4,4 +4,4 @@
 # renders the "归档会话" Settings section that talks to those routes.
 - insert:
     - id: dsh-sessions-manager
-      name: 'dsh-sessions-manager'
+      name: '@forever-lwy/dsh-sessions-manager'

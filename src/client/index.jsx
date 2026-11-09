@@ -11,6 +11,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createDomHub } from './dom-hub.js'
 import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
@@ -443,7 +444,7 @@ const NAV_CSS = `
 }
 `
 
-function markSettingsNav() {
+function markSettingsNav(hub) {
   const LABEL = '会话管理'
   let disposed = false
   let frame = 0
@@ -459,28 +460,24 @@ function markSettingsNav() {
       else b.removeAttribute('data-dsh-nav-sessions')
     }
   }
-  // rAF 合并：整页 MutationObserver 在一个渲染帧里可能触发成百上千次回调，
-  // 每帧最多真正同步一次。
-  const sync = () => { if (!frame && !disposed) frame = requestAnimationFrame(run) }
   run()
-  // 刻意**不**监听 characterData：流式回复逐 token 改文本，会把整页观察器打成
-  // 高频回调；导航按钮的标签只在 childList（面板重渲染）时变化，够用。
-  const obs = new MutationObserver(sync)
-  obs.observe(document.body, { childList: true, subtree: true })
+  // fork：由共享 DOM hub 驱动，只在对话框出现 / 消失 / 内部变化时跑（每帧最多一次），
+  // 流式回复改动对话区不会唤醒它。
+  const off = hub.on('dialog', run)
   return () => {
     disposed = true
     if (frame) cancelAnimationFrame(frame)
     frame = 0
-    obs.disconnect()
+    off()
     document.querySelectorAll('[data-dsh-nav-sessions]').forEach((e) => e.removeAttribute('data-dsh-nav-sessions'))
   }
 }
 
-function installSettingsNavIcons(ctx) {
+function installSettingsNavIcons(ctx, hub) {
   const styleEl = document.createElement('style')
   styleEl.textContent = NAV_CSS
   document.head.appendChild(styleEl)
-  const dispose = markSettingsNav()
+  const dispose = markSettingsNav(hub)
   ctx.effect(() => () => {
     dispose()
     if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl)
@@ -2970,7 +2967,7 @@ const sidebarAdapter = createSidebarAdapter()
 // apply(ctx) 可能被再次调用（HMR / profile 重载）：用模块级守卫保证观察器、
 // 定时器与 document 级监听器只装一份，绝不叠加（叠加会造成重复提示与后台 CPU 增长）。
 let sidebarMenuAugInstalled = false
-function installSidebarSessionMenuAug() {
+function installSidebarSessionMenuAug(hub) {
   if (typeof document === 'undefined') return
   if (sidebarMenuAugInstalled) return
   sidebarMenuAugInstalled = true
@@ -3221,19 +3218,58 @@ function installSidebarSessionMenuAug() {
     window.dispatchEvent(new Event('resize'))
   }
 
+  // fork：DSH 0.2.2 的会话菜单 portal 到 body 后，其 fiber 祖先链上已没有带
+  // `node` 的组件，sessionInfoFromMenu 恒为 null，「删除 / 移动 / 标记未读」
+  // 从未注入。改为记住打开菜单的那一行：按下行内按钮、右键或键盘打开菜单时
+  // 从行自身的 fiber 读出会话（行的 props.node 仍带 id / cwd），菜单在
+  // MENU_ORIGIN_MS 内出现即归属于它。
+  const MENU_ORIGIN_MS = 1500
+  let origin = null
+  const sessionInfoFromRow = (row) => {
+    const node = sidebarAdapter.recognize(row).node
+    if (node && typeof node.id === 'string' && node.id) return { id: node.id, cwd: node.cwd || node.workspacePath || null }
+    const key = row.getAttribute('data-row-key') || ''
+    return key.startsWith('session:') ? { id: key.slice('session:'.length), cwd: null } : null
+  }
+  const rememberOrigin = (e) => {
+    const t = e.target
+    if (!t || typeof t.closest !== 'function') return
+    const row = t.closest('[role="treeitem"][data-row-key^="session:"]')
+    if (!row) return
+    // 行内按钮（⋯）按下、右键菜单，或键盘在行 / 行内按钮上唤出菜单。
+    const viaButton = !!t.closest('button')
+    const viaKey = e.type === 'keydown' && (e.key === 'Enter' || e.key === ' ' || e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))
+    if (e.type !== 'contextmenu' && !viaKey && !((e.type === 'pointerdown' || e.type === 'click') && viaButton)) return
+    const info = sessionInfoFromRow(row)
+    if (!info) return
+    origin = { info, at: Date.now() }
+    // 菜单可能已在本事件之前弹出（按下即开），补扫一次尚未认领的菜单。
+    Promise.resolve().then(scanMenus)
+  }
+  const originInfo = () => (origin && Date.now() - origin.at <= MENU_ORIGIN_MS ? origin.info : null)
+  const listenOpts = { capture: true, passive: true }
+  const ORIGIN_EVENTS = ['pointerdown', 'click', 'contextmenu', 'keydown']
+  for (const type of ORIGIN_EVENTS) document.addEventListener(type, rememberOrigin, listenOpts)
+
   const seen = new WeakSet()
-  const obs = new MutationObserver(() => {
+  const scanMenus = () => {
     if (sidebarAdapter.disabled) return
     const menus = document.querySelectorAll('body > [role="menu"]')
     menus.forEach((menuEl) => {
       if (seen.has(menuEl)) return
-      const info = sessionInfoFromMenu(menuEl)
+      const info = sessionInfoFromMenu(menuEl) || originInfo()
       if (!info) return // not a session menu (e.g. settings / header dropdown)
       seen.add(menuEl)
+      origin = null
       try { augmentMenu(menuEl, info) } catch (e) { /* best-effort DOM shim */ }
     })
-  })
-  obs.observe(document.body, { childList: true, subtree: false })
+  }
+  const off = hub.on('portal', scanMenus)
+  return () => {
+    off()
+    for (const type of ORIGIN_EVENTS) document.removeEventListener(type, rememberOrigin, listenOpts)
+    sidebarMenuAugInstalled = false
+  }
 }
 
 // Left-side per-session status dot (DOM shim). The color is driven by DSH's
@@ -3245,7 +3281,21 @@ function installSidebarSessionMenuAug() {
 //   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
 // 手动未读集合 + read 集合均持久化于 localStorage；打开过即记入 read，绿点不再出现。
 // 另外：进入回收站的会话会整行隐藏（不出现在「未分组」里）。
-function installSidebarStatusDots() {
+// fork：幂等 DOM 写入。classList.add/remove/toggle 与 setAttribute 即使值不变也会
+// 重写属性并产生 MutationRecord（DOM 规范的 update steps），侧栏观察器因此被自己的
+// 写入唤醒，形成每帧一次的 paint 死循环（实测空闲时每秒约 60 次）。只在值真的变化时写。
+function dsmSetAttr(el, name, value) {
+  if (el.getAttribute(name) !== value) el.setAttribute(name, value)
+}
+function dsmClass(el, cls, on) {
+  if (el.classList.contains(cls) !== on) el.classList.toggle(cls, on)
+}
+function dsmStyleProp(el, name, value) {
+  if (value === null) { if (el.style.getPropertyValue(name) !== '') el.style.removeProperty(name) }
+  else if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value)
+}
+
+function installSidebarStatusDots(hub) {
   if (typeof document === 'undefined') return
   const DOT = 'data-dsm-dot'
   // issue #16：被插件隐藏的行打标记；展开计数的扣减统计靠它（数据层不可用时兜底）。
@@ -3705,17 +3755,17 @@ function installSidebarStatusDots() {
       // React 会复用行 DOM：每次先按当前 id 重置血缘视觉，再按需加回。
       // classList 的 add/remove 对已处于目标状态的行是无操作（不触发
       // MutationObserver），徽标节点只允许「缺失才创建」。
-      row.classList.remove('dsm-row-sub')
+      // fork：直接写最终状态（先清后加会每帧写两次，重新触发观察器）。
+      dsmClass(row, 'dsm-row-sub', !!(li && isSub))
+      if (!(li && isSub)) dsmStyleProp(row, '--dsm-indent', null)
       // 选中行标记：徽标/标签的「选中才显示」靠它驱动（CSS 侧）。
       // toggle 同值时不动 DOM 属性，不会触发 MutationObserver。
-      row.classList.toggle('dsm-row-active', id === activeId)
-      row.style.removeProperty('--dsm-indent')
+      dsmClass(row, 'dsm-row-active', id === activeId)
       let hideLineage = false
       if (li && isSub) {
-        row.classList.add('dsm-row-sub')
         if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
         const depth = Math.max(0, (li.delegationDepth || 1) - 1)
-        if (depth > 0) row.style.setProperty('--dsm-indent', String(depth * 10) + 'px')
+        dsmStyleProp(row, '--dsm-indent', depth > 0 ? String(depth * 10) + 'px' : null)
       } else if (li && isEmpty) {
         // 空白行一律隐藏（原纯净视图行为固化，见 dsmLineage 注释）。
         hideLineage = true
@@ -3773,7 +3823,7 @@ function installSidebarStatusDots() {
         // 徽标 DOM 随血缘常驻，显隐交给 CSS（选中 / 悬停 / 键盘聚焦）。已
         // 展开的父行加 dsm-row-open 让徽标常驻可见——否则切走之后就再也
         // 收不回来了。隐藏状态不占位：标题拿全宽，悬停才让位给徽标。
-        row.classList.toggle('dsm-row-open', open)
+        dsmClass(row, 'dsm-row-open', open)
         if (kids) {
           const text = (open ? '▾ ' : '▸ ') + kids + ' 子代理'
           let badge = existingKids
@@ -3807,7 +3857,7 @@ function installSidebarStatusDots() {
           dsmDropSubList(row, id)
         }
       } else {
-        row.classList.remove('dsm-row-open')
+        dsmClass(row, 'dsm-row-open', false)
         const staleKids = row.querySelector('[data-dsm-kids]')
         if (staleKids) staleKids.remove()
       }
@@ -4055,21 +4105,16 @@ function installSidebarStatusDots() {
   // 1.5s 后再拉一次，把「⑂ 分支」等后到信息的台阶从 32s 缩到秒级。
   const coldSecondBeat = setTimeout(() => dsmLoadTrashIds(), 1500)
   paint()
-  const obs = new MutationObserver(schedulePaint)
-  obs.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['data-state', 'aria-selected', 'class', 'style'],
-    characterData: true,
-  })
+  // fork：原先是整页 childList + 属性 + characterData 观察器，流式回复每个 token
+  // 都会唤醒 paint。现在只在会话树（及其属性 / 文本）变化时由共享 hub 触发。
+  const offSidebar = hub.on('sidebar', paint)
   const tickTimer = setInterval(tick, FALLBACK_TICK_MS)
   // 插件卸载（HMR / 停用）时整场清退：没有这一步，interval 和 observer 会
   // 跟着旧闭包活到页面关闭，注入节点也会留在侧栏上。
   return () => {
     clearInterval(tickTimer)
     clearTimeout(coldSecondBeat)
-    obs.disconnect()
+    offSidebar()
     dsmNotifySink = null
     dsmTeardownSidebarAug()
   }
@@ -4084,7 +4129,7 @@ let sidebarDragInstalled = false
 // 「当前拖的是一条会话行」——自动滚动只认这个状态。从 Finder 拖文件、拖选文本、
 // 拖图片进窗口同样会触发 dragover，那些绝不该把侧栏滚起来。
 let dsmSessionDragActive = false
-function installSidebarWorkspaceDrag() {
+function installSidebarWorkspaceDrag(hub) {
   if (typeof document === 'undefined') return
   if (sidebarDragInstalled) return
   sidebarDragInstalled = true
@@ -4128,9 +4173,9 @@ function installSidebarWorkspaceDrag() {
       const session = sessionForRow(row)
       const ws = workspaceForRow(row)
       if (session) {
-        row.setAttribute('aria-description', '可拖动到其他工作区；键盘用户可通过更多菜单中的移动会话操作')
+        dsmSetAttr(row, 'aria-description', '可拖动到其他工作区；键盘用户可通过更多菜单中的移动会话操作')
       }
-      if (ws) row.setAttribute('data-dsm-workspace-drop', '')
+      if (ws) dsmSetAttr(row, 'data-dsm-workspace-drop', '')
     })
   }
   const refresh = async () => {
@@ -4225,8 +4270,8 @@ function installSidebarWorkspaceDrag() {
     decorateTimer = requestAnimationFrame(() => { decorateTimer = null; decorateRows() })
   }
   refresh()
-  const observer = new MutationObserver(scheduleDecorate)
-  observer.observe(document.body, { childList: true, subtree: true })
+  // fork：只在会话树变化时重新装饰（共享 hub），不再观察整页。
+  hub.on('sidebar', decorateRows)
   // 原先这里每 5s 无脑全表刷新一次。该接口在 host 侧要遍历全部会话，
   // 大库（issue #1: 49 会话 / 14 万帧）上每次都是一次重活，页面挂着就一直占宿主 CPU，
   // 连累 session.history 之类 RPC 超时。拖拽元数据根本不需要 5s 精度：
@@ -4399,6 +4444,25 @@ function installSidebarDragAutoScroll() {
   return dispose
 }
 
+// fork：所有 DOM 垫片挂在同一个共享 hub 上；订阅完再启动，首帧即可全部跑一遍。
+function installDomShims(ctx, hub) {
+  installSettingsNavIcons(ctx, hub)
+  const disposeMenuAug = installSidebarSessionMenuAug(hub)
+  if (disposeMenuAug) ctx.effect(() => disposeMenuAug)
+  // 侧栏增强的卸载清退挂到 cordis effect：插件停用/HMR 时 interval、
+  // 订阅与全部注入 DOM 一并回收（否则泄漏到页面关闭）。
+  const disposeSidebarDots = installSidebarStatusDots(hub)
+  if (disposeSidebarDots) ctx.effect(() => disposeSidebarDots)
+  installSidebarWorkspaceDrag(hub)
+  // 拖拽自动滚动只挂原生 drag 监听，插件停用 / HMR 时靠返回的 disposer 摘干净。
+  // 不能写成 `ctx.effect(() => () => globalThis[key].dispose())`：HMR 时旧 cleanup
+  // 晚于新 apply 执行，按全局键摘除会连新一代的监听器一起摘掉（即 install 那段
+  // 注释里说的死锁）。
+  const disposeDragAutoScroll = installSidebarDragAutoScroll()
+  if (disposeDragAutoScroll) ctx.effect(() => disposeDragAutoScroll)
+  hub.start()
+}
+
 export function apply(ctx) {
   dsmClientCtx = ctx
   dsmLoadCapabilities()
@@ -4416,19 +4480,13 @@ export function apply(ctx) {
     document.addEventListener('visibilitychange', () => { if (!document.hidden) beat() }, { signal: beatAc.signal })
   }
   ctx.effect(() => () => { clearInterval(beatTimer); if (beatAc) beatAc.abort() })
-  installSettingsNavIcons(ctx)
-  installSidebarSessionMenuAug()
-  // 侧栏增强的卸载清退挂到 cordis effect：插件停用/HMR 时 interval、
-  // MutationObserver 与全部注入 DOM 一并回收（否则泄漏到页面关闭）。
-  const disposeSidebarDots = installSidebarStatusDots()
-  if (disposeSidebarDots) ctx.effect(() => disposeSidebarDots)
-  installSidebarWorkspaceDrag()
-  // 拖拽自动滚动只挂原生 drag 监听，插件停用 / HMR 时靠返回的 disposer 摘干净。
-  // 不能写成 `ctx.effect(() => () => globalThis[key].dispose())`：HMR 时旧 cleanup
-  // 晚于新 apply 执行，按全局键摘除会连新一代的监听器一起摘掉（即 install 那段
-  // 注释里说的死锁）。
-  const disposeDragAutoScroll = installSidebarDragAutoScroll()
-  if (disposeDragAutoScroll) ctx.effect(() => disposeDragAutoScroll)
+  // fork：四个整页 MutationObserver 合并为一个共享 DOM hub（见 dom-hub.js）。
+  // 卸载时 hub 先停，所有订阅随之失效。
+  const hub = typeof document === 'undefined' || typeof MutationObserver === 'undefined' ? null : createDomHub()
+  if (hub) {
+    ctx.effect(() => () => hub.dispose())
+    installDomShims(ctx, hub)
+  }
   const workspacesSvc = ctx.get('workspaces')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
