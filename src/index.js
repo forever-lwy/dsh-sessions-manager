@@ -25,6 +25,7 @@ import { createSessionMetaCache, fingerprintOf, persistFingerprintOf } from './s
 import { createTitleIndexStore } from './title-persist-index.js'
 import { createEmptyScanStore } from './empty-scan-index.js'
 import { createActiveSessionTracker } from './active-session.js'
+import { watchTrashedSessionReuse } from './trash-resume.js'
 import { createPersistenceAdapter } from './compat/persistence.js'
 import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 import { pathOwnsSession } from './path-guard.js'
@@ -873,12 +874,19 @@ export function apply(ctx) {
   // so we just drop it from the recycle-bin index and the sidebar reveals it in
   // its original workspace (no move / no re-attach needed). Repeated restores
   // fail with an accurate 404 — there is no second entry to restore.
-  async function restoreFromTrash(sid) {
+  async function restoreFromTrash(sid, { userMessageAt } = {}) {
     requireSessionId(sid)
     requireCapability(capabilities, 'restoreIndexedSession')
+    const resumed = Number.isFinite(userMessageAt)
     let outcome = null
     await mutateTrash(async (store) => {
       const entry = store.items.find((t) => String(t.sessionId) === sid)
+      // Recheck under the trash mutation queue: a newer delete must win over
+      // an older message, even when the restoration was already scheduled.
+      if (resumed && (!entry || !Number.isFinite(entry.deletedAt) || entry.deletedAt >= userMessageAt)) {
+        outcome = { ok: true, restored: false }
+        return
+      }
       if (!entry) {
         if (store.purgedSessionIds.map(String).includes(sid)) {
           const error = new Error('该会话已彻底删除，无法从回收站恢复')
@@ -911,6 +919,19 @@ export function apply(ctx) {
     })
     return outcome || { ok: true, restored: true }
   }
+
+  const resumeEffect = typeof ctx.effect === 'function' ? (fn) => ctx.effect(fn) : (fn) => fn()
+  resumeEffect(() => watchTrashedSessionReuse(ctx, async (sid, userMessageAt) => {
+    const entry = (await readTrashStore()).items.find((item) => String(item.sessionId) === sid)
+    if (!entry || entry.deletedAt >= userMessageAt) return
+    const outcome = await restoreFromTrash(sid, { userMessageAt })
+    if (!outcome.restored) return
+    metaCache.invalidate(sid)
+    // Publish only after the index is durable. Clients observing the original
+    // activity may have fetched before restoration finished; this is the same
+    // real user activity, repeated so their sidebar converges immediately.
+    if (typeof ctx.emit === 'function') ctx.emit('api-session/activity', sid, userMessageAt)
+  }))
 
   // Permanently erase a trashed session: physically delete its log (still in
   // the original workspace dir) and detach it from any workspace so DSH drops it.

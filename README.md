@@ -2,7 +2,9 @@
 >
 > - 侧栏的四个整页 MutationObserver 合并为一个共享 DOM hub（`src/client/dom-hub.js`）。整页只观察节点增删，属性和文本只在会话树内观察，流式回复不再唤醒侧栏重绘。
 > - 修复 DSH 0.2.2 会话「⋯」菜单与右键菜单中缺少「删除 / 移动到… / 标记未读」的问题：菜单 portal 后已无法从 fiber 链读到会话，改为记录打开菜单的那一行。
-> - 发版：`main` 存放源码（沿用上游，`lib/` 也入库）；推送 `v<版本>` 标签后由 GitHub Actions 构建、测试并写入 `release` 分支。上游的 compat、npm publish 工作流已移除。
+> - 会话创建、接收消息、运行状态变化后合并刷新侧栏，不再等空闲轮询的 32 秒台阶；原生会话实例释放时补拉持久会话列表，切走后仍能找回后台会话。流式 token 变化不触发全表请求。
+> - 已经进入回收站的会话再次收到真实用户消息时自动恢复；后台回复、标题生成和插件上下文不会自行撤销删除。当前新会话、已提交消息或正在运行的原生会话不受旧空白缓存隐藏。
+> - 发版：`master` 只存源码，`lib/` 不入库，`prepare` 保留本地安装构建兜底；推送 `v<版本>` 标签后由 GitHub Actions 构建、测试并写入 `release` 分支。上游的 compat、npm publish 工作流已移除。
 
 # dsh-sessions-manager
 
@@ -166,7 +168,7 @@ lib/index.js       预构建 host（ESM）
 lib/client.js      预构建 client（ModuleLoader CJS handshake）
 ```
 
-`lib/` 已预构建，clone 下来即可直接用、无需 esbuild。若要改源码，运行 `npm i -D esbuild && npm run build` 重新生成 `lib/`；提交前用 `npm run check:dist` 重建并与仓库产物比对（CI 跑同一道检查），**改版本号后务必一并重建**——构建指纹可复现为 `vX.Y.Z+源码哈希`，正是为了让这道比对精确可靠。
+`release` 分支含预构建的 `lib/`，通过 `github:forever-lwy/dsh-sessions-manager` 安装时无需构建。`master` 是开发源码，在插件目录执行 `npm ci`、`npm run build`、`npm run check` 和 `npm test`；构建产物不提交到源码分支。开发副本不接入常用 profile。发版递增版本并提交后，由用户决定何时推 `v<版本>` 标签、何时在界面更新。
 
 ## Host 路由
 
