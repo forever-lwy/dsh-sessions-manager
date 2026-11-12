@@ -12,6 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createDomHub } from './dom-hub.js'
+import { installSessionSync, shouldHideEmptySession } from './session-sync.js'
 import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
 
 export const inject = ['slots']
@@ -2742,6 +2743,11 @@ let dsmCapabilities = null
 // 血缘分层披露（issue #6）：服务端血缘分类 + 本地视图状态。
 // dsmLineage: id → { origin, parentSession, delegationDepth, empty }
 const dsmLineage = new Map()
+function dsmHideEmpty(id, info = dsmLineage.get(id), selected = id === dsmActiveSessionId()) {
+  let summary = null
+  try { summary = dsmClientCtx?.get('sessions')?.list?.getSnapshot()?.byId?.[id] } catch (e) { /* legacy */ }
+  return shouldHideEmptySession(info, summary, selected)
+}
 // v3.6.2：host 预热是否还在途（sidebar-state/sessions 的 warmPending 旗标）。
 // 在途 → 侧栏轮询从 32s 台阶收紧到每拍（4s），标题/血缘一补齐就浮现；
 // 完成瞬间（true→false）触发一次性回调（面板自动补刷新，见 dsmOnWarmDone）。
@@ -2779,8 +2785,7 @@ function dsmNotify(text, kind) {
   if (!done) { try { console.warn('[dsh-sessions-manager] ' + text) } catch (e) {} }
 }
 function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.delete(fn) }
-// 空白会话一律隐藏（原「纯净视图」的默认行为固化为唯一行为，开关已于
-// 0.1.3 移除：上游本就不把空白会话渲染进侧栏，开关没有可服务的场景）。
+// 其他空白会话隐藏，保留当前草稿及原生已确认有内容/运行中的会话。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
 // "omitted from the ordinary sidebar"），收纳由上游完成，插件侧不做。
 async function dsmLoadCapabilities() {
@@ -2791,7 +2796,12 @@ function dsmActionCapability(name, legacy) {
   const source = dsmCapabilities && dsmCapabilities.actions
   return source ? (source[name] || (legacy && source[legacy]) || null) : null
 }
-async function dsmLoadTrashIds() {
+let dsmTrashLoad = null
+function dsmLoadTrashIds() {
+  if (!dsmTrashLoad) dsmTrashLoad = dsmReadTrashIds().finally(() => { dsmTrashLoad = null })
+  return dsmTrashLoad
+}
+async function dsmReadTrashIds() {
   try {
     const r = await postJSON('/archived-sessions/sidebar-state', {})
     dsmTrashIds = new Set(((r && r.trashedSessionIds) || []).map(String))
@@ -3456,7 +3466,7 @@ function installSidebarStatusDots(hub) {
       hiddenIds = new Set()
       if (dsmTrashIds) for (const id of dsmTrashIds) hiddenIds.add(id)
       for (const id of purged) hiddenIds.add(id)
-      for (const [id, info] of dsmLineage.entries()) if (info && info.empty) hiddenIds.add(id)
+      for (const [id, info] of dsmLineage.entries()) if (dsmHideEmpty(id, info)) hiddenIds.add(id)
       return hiddenIds
     }
     rows.forEach((row) => {
@@ -3580,7 +3590,7 @@ function installSidebarStatusDots(hub) {
           if (!id) continue
           if ((dsmTrashIds && dsmTrashIds.has(id)) || purgedNow.has(id)) continue
           const li = dsmLineage.get(id)
-          if (li && li.empty) continue
+          if (dsmHideEmpty(id, li)) continue
           ids.add(id)
         }
         // 已渲染进 DOM 的可见行：本组会话行里不在隐藏标记中的那些。
@@ -3766,8 +3776,9 @@ function installSidebarStatusDots(hub) {
         if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
         const depth = Math.max(0, (li.delegationDepth || 1) - 1)
         dsmStyleProp(row, '--dsm-indent', depth > 0 ? String(depth * 10) + 'px' : null)
-      } else if (li && isEmpty) {
-        // 空白行一律隐藏（原纯净视图行为固化，见 dsmLineage 注释）。
+      } else if (dsmHideEmpty(id, li, id === activeId)) {
+        // Current blanks and a native nonblank/running row outrank an older
+        // background empty-scan result; a first send must never be hidden.
         hideLineage = true
       }
       if (hideLineage) {
@@ -4466,6 +4477,14 @@ function installDomShims(ctx, hub) {
 export function apply(ctx) {
   dsmClientCtx = ctx
   dsmLoadCapabilities()
+  if (typeof ctx.inject === 'function') ctx.inject(['sessions'], (scope) => {
+    scope.effect(() => installSessionSync({
+      sessions: scope.get('sessions'), remote: scope.get('remote'),
+      document: typeof document === 'undefined' ? null : document,
+      refreshSidebar: () => dsmLoadTrashIds(),
+      onError: (error) => console.warn('[dsh-sessions-manager] sidebar synchronization failed:', error),
+    }))
+  })
   // 活跃会话心跳：页面隐藏时不发（用户没在看；host 侧 TTL 到期后自然失效，
   // 于是「无法证明活跃」→ 放行移动，不会把会话永久锁死）。
   const beat = () => {

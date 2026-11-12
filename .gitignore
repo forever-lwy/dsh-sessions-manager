@@ -2,9 +2,8 @@
 node_modules/
 .pnpm-store/
 
-# Build output (pre-built lib/ is committed so users get it out of the box;
-# uncomment if you prefer forcing a build:)
-# lib/
+# Builds are published by CI on release; master keeps source only.
+lib/
 
 # OS / editor
 .DS_Store

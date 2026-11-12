@@ -160,7 +160,9 @@ lib/index.js       pre-built host (ESM)
 lib/client.js      pre-built client (ModuleLoader CJS handshake)
 ```
 
-`lib/` is pre-built, so cloning and using it needs no esbuild. To modify the source, run `npm i -D esbuild && npm run build` to regenerate `lib/`; before committing, `npm run check:dist` rebuilds and diffs `lib/` against the committed bundles (CI runs the same check), so **always rebuild after a version bump** — the build stamp is reproducible as `vX.Y.Z+source-hash`, which is what makes that comparison exact.
+The `release` branch includes prebuilt `lib/` bundles for installation from `github:forever-lwy/dsh-sessions-manager`. Development happens on `master`, where `lib/` is ignored and `prepare` remains a source-install fallback. Run `npm ci`, `npm run build`, `npm run check`, and `npm test` in this plugin directory. The user decides when to push a version tag and install the resulting release.
+
+The fork refreshes sidebar metadata on Session lifecycle changes, coalesces bursts, and repairs the persisted catalog after a live instance is disposed. Token streaming does not trigger full-list requests. A real user message sent to a trashed conversation restores it; background replies, generated titles, and plugin context do not undo an intentional deletion. Stale empty-scan hints never hide the selected draft or a native nonblank/running Session.
 
 ## Host routes
 
