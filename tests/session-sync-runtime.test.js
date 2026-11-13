@@ -1,4 +1,4 @@
-// Run the shipped browser bundle with Cordis and the actual 0.2.2-rc.1
+// Run the shipped browser bundle with Cordis and the actual 0.2.2-rc.3
 // catalog service. No live profile, model request, or message log is involved.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
