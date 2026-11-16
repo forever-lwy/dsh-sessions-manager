@@ -31,6 +31,7 @@ import { detectCapabilities, requireCapability } from './compat/capabilities.js'
 import { pathOwnsSession } from './path-guard.js'
 import { purgeSessionArtifacts, moveSessionToCwd } from './handle-era-ops.js'
 import { classifyLineage, emptyScanCandidate, isEmptyEventTypes, subagentDescendantsOf, EMPTY_DECODE_LIMIT } from './lineage.js'
+import { cachedTitleOf, readCachedHints } from './projection-hints.js'
 
 // 构建指纹：build.mjs 以 define 在编译期注入；直接以源码运行（测试）时为 'dev'。
 // 用途：capabilities 带出 buildStamp，一眼判断「运行中的 host 是不是这份构建」——
@@ -275,6 +276,32 @@ export function apply(ctx) {
       const title = snap && snap.values ? snap.values.title : null
       return typeof title === 'string' && title.length > 0 ? title : null
     } catch (e) { return null }
+  }
+
+  // —— 0.2.2+ 官方持久投影缓存（3.8.1 底座换轨）——————————————————————————
+  // 上面的 projectionTitleOf 只覆盖**已实例化**的 live 会话；历史会话（冷会话）
+  // 以前只能等 readTitleSnapshots 把整本日志解码（issue #8）。0.2.2-rc.3 默认
+  // 挂载的 sessionProjectionCache 补上了这一层：cachedSnapshot(header, keys)
+  // 只读 header、零 I/O，冷会话也能直接拿到标题与 sessionListMetadata.blank。
+  //
+  // 红线：
+  //   1. 服务不存在（0.1.7 / 0.2.0 早期）→ null，行为与 3.8.0 完全一致；
+  //   2. 只当提示用（缓存可能过期但永不超前），title 为空仍是「未知」→ 交预热；
+  //   3. blank 只做单向预筛（见 projection-hints.js 的说明）。
+  function cachedHintsOf(header) {
+    if (!header || typeof header !== 'object') return null
+    try { return readCachedHints(ctx.get('sessionProjectionCache'), ctx.get('sessionProjections'), header) } catch (e) { return null }
+  }
+
+  function cachedTitleOfHeader(header) {
+    try { return cachedTitleOf(ctx.get('sessionProjectionCache'), ctx.get('sessionProjections'), header) } catch (e) { return null }
+  }
+
+  // 持久缓存只服务**冷会话**：live 会话的标题以注册表投影为准（上游也这么分：
+  // api-session-controller 的 projectionsFor 对 live 走 snapshot、对 header 才走
+  // cache）。否则刚改名、cell 还没折叠的那一瞬间会被上一代缓存顶回旧标题。
+  function isLiveSession(liveStore, id) {
+    try { return !!(liveStore && typeof liveStore.get === 'function' && liveStore.get(id)) } catch (e) { return false }
   }
 
   async function archivedState() {
@@ -690,7 +717,10 @@ export function apply(ctx) {
       persistenceEntry = found
       header = found ? found.header : null
       if (header) {
-        const loc = persistence.locate(header)
+        // 用校验版定位：官方 locate() 按 header.version 拼名，老会话磁盘上仍是
+        // legacy 命名，采信它会把这个不存在路径永久写进回收站条目，日后
+        // restore / purge 全部对着空气操作（issue #26 现象 2 的源头）。
+        const loc = await persistence.locateVerified(header).catch(() => null)
         if (loc && typeof loc.path === 'string') removedPath = loc.path
         cwd = header.cwd || null
         title = header.title || (header.meta && header.meta.title) || null
@@ -720,6 +750,18 @@ export function apply(ctx) {
       throw error
     }
     const archived = await mutateArchived((list) => ({ next: null, value: list.includes(sid) })).catch(() => false)
+    // 删除时同步原生归档（issue #27）。
+    //
+    // 回收站会话的日志留在原工作区，DSH 的原生账本（sessionCount / 水位线 /
+    // 「展开其余 N 个会话」按钮）仍然把它算作可见。插件只能渲染后藏 DOM，而按钮
+    // 每次被 React 重建都会带着原生旧计数闪回来，形成 HIDDEN/VISIBLE 振荡。
+    // 让原生账本本身收敛才是稳定的解法：删除即归档，原生列表不再计入。
+    //
+    // `wasArchived` 仍然记录「删除前」的真实状态，恢复时按它对称处理
+    // （见 restoreFromTrash 的 `entry.wasArchived === false` 分支）。
+    if (!archived) {
+      try { await archiveOne(sid) } catch (e) { /* 原生归档失败不阻塞删除：DOM shim 仍兜底 */ }
+    }
     await mutateTrash((store) => {
       const entry = {
         // v3.6.2 #7：不再把 cwd/裸 id 冒充标题永久定格——存 null，预热解出后
@@ -849,14 +891,27 @@ export function apply(ctx) {
     const store = await readTrashStore()
     const entry = store.items.find((t) => String(t.sessionId) === sid)
     let originalPath = entry && typeof entry.originalPath === 'string' ? entry.originalPath : null
+    let repairedPath = null
     if (!originalPath && header) {
       // handle 时代官方收走了 locate，用守卫式推导（root → 目录结构 → id 归属）
       // 代替：推导成功且文件在盘 = 真核验通过，而不是标注 unverified 放行。
       const loc = await persistence.locateVerified(header).catch(() => null)
-      if (loc && typeof loc.path === 'string') originalPath = loc.path
+      if (loc && typeof loc.path === 'string') { originalPath = loc.path; repairedPath = loc.path }
     }
     if (originalPath) {
-      const existsOnDisk = await stat(originalPath).then(() => true).catch(() => false)
+      let existsOnDisk = await stat(originalPath).then(() => true).catch(() => false)
+      if (!existsOnDisk && header) {
+        // 存量条目纠偏（issue #22 现象 B / #26 现象 2）：索引里记的可能是
+        // 「按 header.version 拼出来的名字」，而磁盘上还停在老代命名。3.7.10
+        // 会直接报 DSM_SESSION_LOG_MISSING，把「文件明明在」说成「已消失」。
+        // 这里按当前磁盘布局重新推导一次；推导结果本身已通过 stat 校验。
+        const loc = await persistence.locateVerified(header).catch(() => null)
+        if (loc && typeof loc.path === 'string' && loc.path !== originalPath) {
+          originalPath = loc.path
+          repairedPath = loc.path
+          existsOnDisk = true
+        }
+      }
       if (!existsOnDisk) {
         return { ok: false, status: 409, code: 'DSM_SESSION_LOG_MISSING', message: '回收站索引仍记录该会话，但其日志文件已消失（可能被外部移动或删除）' }
       }
@@ -867,7 +922,7 @@ export function apply(ctx) {
     if (cwd) {
       try { workspaceGone = !w.list().some((ent) => ent.path === cwd) } catch (e) { workspaceGone = false }
     }
-    return { ok: true, workspaceGone, verified }
+    return { ok: true, workspaceGone, verified, repairedPath }
   }
 
   // Restore a trashed session: the log never left its original workspace dir,
@@ -968,10 +1023,17 @@ export function apply(ctx) {
           }
         } catch (e) {}
       }
-      if (!target && typeof entry.originalPath === 'string') target = entry.originalPath
+      if (!target && typeof entry.originalPath === 'string') {
+        // 兜底路径必须先验存在：originalPath 可能是老代命名拼出来的假路径，
+        // 采信它会让下面的 unlink 对着空气操作（ENOENT 被当成功后仍写 tombstone，
+        // 条目从此不可回退 —— issue #26 现象 2）。
+        const ok = await stat(entry.originalPath).then(() => true).catch(() => false)
+        if (ok) target = entry.originalPath
+      }
       if (!target) {
-        const error = new Error('无法确认该会话的物理日志位置，已停止永久删除')
+        const error = new Error('无法确认该会话的物理日志位置（日志可能已被外部移动或删除），已停止永久删除')
         error.status = 409
+        error.code = 'DSM_SESSION_LOG_MISSING'
         throw error
       }
       // JSONL persistence stores logs as
@@ -1019,6 +1081,40 @@ export function apply(ctx) {
         await purgeSessionArtifacts(sp, sid, locatedHeader)
       } else if (target) {
         try { await unlink(target) } catch (e) { if (e && e.code !== 'ENOENT') throw new Error('删除文件失败：' + String((e && e.message) || e)) }
+        // legacy 布局：同一会话目录里可能并存多代日志（session.jsonl.zstd 与
+        // session.v3.jsonl.zstd，见 issue #22 的实测）。只删最高代会让 DSH 回退
+        // 读到旧代，等于没删。这里把同目录其它代际一并清掉。
+        try {
+          const dir = dirname(target)
+          for (const name of await readdir(dir)) {
+            if (name === basename(target)) continue
+            if (!/^session(\.v\d+)?\.jsonl(\.zstd|\.zst)?$/.test(name)) continue
+            try { await unlink(join(dir, name)) } catch (e) { /* 单个旧代失败由下面的复核兜住 */ }
+          }
+        } catch (e) { /* 目录不可读：交给下面的复核 */ }
+      }
+      // 删除后复核：unlink 返回不代表文件真的没了（路径被并发改写、后端走了
+      // 另一份副本、或 purgeSessionArtifacts 只删了部分产物）。3.7.10 在这里
+      // 直接报成功并移除条目，用户看到的是「已彻底删除」而文件仍在原处，
+      // 之后 restore 只能得到 410 —— 条目和文件都回不去了（issue #26）。
+      {
+        let stillThere = await stat(target).then(() => true).catch(() => false)
+        if (!stillThere) {
+          // 目录里若还剩别的代际日志，DSH 仍能读到这本会话。
+          try {
+            const names = await readdir(dirname(target))
+            stillThere = names.some((n) => /^session(\.v\d+)?\.jsonl(\.zstd|\.zst)?$/.test(n))
+          } catch (e) { /* 目录已不在 = 干净 */ }
+        }
+        if (stillThere) {
+          // 回滚 tombstone：条目要留在回收站里可重试，且不能被判成「已彻底删除」。
+          store.purgedSessionIds = store.purgedSessionIds.filter((id) => String(id) !== sid)
+          try { await writeTrashStore(store) } catch (e) { /* 回滚失败时条目仍在，下次重试 */ }
+          const error = new Error('日志文件仍在磁盘上，彻底删除未完成；回收站条目已保留，可重试')
+          error.status = 409
+          error.code = 'DSM_PURGE_INCOMPLETE'
+          throw error
+        }
       }
       try { for (const ent of w.list()) { if (ent.sessionIds.includes(sid)) { try { await ent.detachSession(sid) } catch (e) {} } } } catch (e) {}
       try { if (w.sessionPaths && w.sessionPaths.delete) w.sessionPaths.delete(sid) } catch (e) {}
@@ -1587,10 +1683,35 @@ export function apply(ctx) {
       (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
     ]))
     const { cached, missing } = metaCache.partition(visibleIds, statsById)
-    // P4：missing 里先查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
+    // 命中顺序（3.8.1 换轨后）：零 I/O 的官方投影排在磁盘索引之前。
+    //   ① live 会话：注册表 cachedSnapshot（内存 cell，最新）
+    //   ② 冷会话：官方持久投影缓存 cachedSnapshot / cachedPredecessorTitle
+    //   ③ 本地持久标题索引（磁盘，await——只在①②都没命中时才付这个成本）
+    //   ④ 后台预热（整本解码，只兜最后一批）
+    // ①② 都是同步的，且命中即从「需要补齐」里摘掉：大库冷启动不再把每条历史
+    // 会话都推给 readTitleSnapshots（issue #8 的 90s CPU 来源）。
+    const projectionMeta = new Map()
+    const unresolved = []
+    for (const id of missing) {
+      const entry = entryById.get(id)
+      const header = entry && entry.header ? entry.header : null
+      const title = projectionTitleOf(live, id) || (isLiveSession(live, id) ? null : cachedTitleOfHeader(header))
+      // 只信非空字符串：null = 未知（cell 可能还没折叠），继续往下走。
+      if (title == null) { unresolved.push(id); continue }
+      const meta = {
+        title,
+        cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
+        createdAt: (header && header.createdAt != null) ? header.createdAt : null,
+      }
+      projectionMeta.set(id, meta)
+      // metaCache.set 在指纹不可算时拒绝写入，所以命中结果另存 projectionMeta，
+      // 本请求的渲染链直接可用——缓存只是增益。
+      metaCache.set(id, statsById.get(id), meta)
+    }
+    // P4：仍缺的再查持久标题索引（冷启动跳过整本解码），命中的回填内存缓存。
     // cwd/createdAt 回填时以最新 list header 为权威——持久条目里的 cwd 可能因
     // 移动会话而陈旧（sz 指纹对 cwd 无感知），标题才是索引的产出物。
-    const persisted = await hydrateFromPersist(missing, statsById)
+    const persisted = await hydrateFromPersist(unresolved, statsById)
     for (const [id, meta] of persisted) {
       const entry = entryById.get(id)
       const header = entry && entry.header ? entry.header : null
@@ -1600,27 +1721,8 @@ export function apply(ctx) {
         createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
       })
     }
-    const stillMissing0 = missing.filter((id) => !persisted.has(id))
-    // 0.2.0+ 官方投影快路径：先把「已实例化且 cell 已 materialize」的会话从
-    // 预热队列里捞回来（cachedSnapshot 零 I/O），剩下的才进后台预热。
-    // 注意：metaCache.set 在指纹不可算（无 stat / revision 缺失）时**拒绝写入**，
-    // 所以命中结果另存 projectionMeta，本请求的渲染链直接可用——缓存只是增益。
-    const projectionMeta = new Map()
-    const stillMissing = []
-    for (const id of stillMissing0) {
-      const title = projectionTitleOf(live, id)
-      if (title == null) { stillMissing.push(id); continue }
-      const entry = entryById.get(id)
-      const header = entry && entry.header ? entry.header : null
-      const meta = {
-        title,
-        cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
-        createdAt: (header && header.createdAt != null) ? header.createdAt : null,
-      }
-      projectionMeta.set(id, meta)
-      metaCache.set(id, statsById.get(id), meta)
-    }
-    // issue #8：缺失部分交后台预热（分批 + 让步），请求路径零投影、零日志解码。
+    const stillMissing = unresolved.filter((id) => !persisted.has(id))
+    // issue #8：仍然缺的才进后台预热（分批 + 让步），请求路径零投影、零日志解码。
     if (stillMissing.length) enqueueWarm(stillMissing, statsById, entryById)
     const items = []
     for (const id of visibleIds) {
@@ -1753,6 +1855,14 @@ export function apply(ctx) {
     // 墓碑只对「当前不存在」的 id 继续输出；同 id 会话重新出现时必须让位。
     const present = new Set(ids)
     const activeTombstones = store.purgedSessionIds.map(String).filter((id) => !present.has(id))
+    // 官方持久投影缓存的冷提示（同步、零 I/O）。标题与 blank 共用同一次读取——
+    // 每条会话只查一次表，别在下面的血缘循环里再查一遍。
+    // 必须声明在 if 之外：血缘循环对所有 entries 都要读它。
+    const hintsById = new Map()
+    for (const entry of entries) {
+      const hints = cachedHintsOf(entry.header)
+      if (hints) hintsById.set(String(entry.id), hints)
+    }
     if (ids.length) {
       const usage = await collectUsage(entries)
       const entryById = new Map(entries.map((entry) => [entry.id, entry]))
@@ -1761,8 +1871,26 @@ export function apply(ctx) {
         (usage.statsById && usage.statsById.get(id)) || { mtimeMs: usage.mtimeById.get(id), size: usage.sizeById.get(id) },
       ]))
       const { cached, missing } = metaCache.partition(ids, statsById)
+      // 命中顺序与 /sessions 一致：live 注册表 → 官方持久投影缓存 → 本地索引 → 预热。
+      const projectionMeta = new Map()
+      const unresolved = []
+      for (const id of missing) {
+        const entry = entryById.get(id)
+        const header = entry && entry.header ? entry.header : null
+        const hints = hintsById.get(id) || null
+        const title = projectionTitleOf(sessions, id)
+          || (isLiveSession(sessions, id) ? null : (hints && hints.title ? hints.title : null))
+        if (title == null) { unresolved.push(id); continue }
+        const meta = {
+          title,
+          cwd: (header && typeof header.cwd === 'string' && header.cwd) ? header.cwd : null,
+          createdAt: (header && header.createdAt != null) ? header.createdAt : null,
+        }
+        projectionMeta.set(id, meta)
+        metaCache.set(id, statsById.get(id), meta)
+      }
       // P4：与列表构建共用持久标题索引，冷启动零解码。
-      const persisted = await hydrateFromPersist(missing, statsById)
+      const persisted = await hydrateFromPersist(unresolved, statsById)
       for (const [id, meta] of persisted) {
         const entry = entryById.get(id)
         const header = entry && entry.header ? entry.header : null
@@ -1772,22 +1900,22 @@ export function apply(ctx) {
           createdAt: (header && header.createdAt != null) ? header.createdAt : meta.createdAt,
         })
       }
-      const rest = missing.filter((id) => !persisted.has(id))
+      const rest = unresolved.filter((id) => !persisted.has(id))
       // issue #8：缺失标题不在请求路径上同步投影（runtime 投影 = 逐条整本解码），
       // 交后台预热补齐；侧栏高频轮询会让补齐结果自然浮现。
       if (rest.length) enqueueWarm(rest, statsById, entryById)
       for (const id of ids) {
-        const meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || null
+        const meta = metaCache.get(id, statsById.get(id)) || persisted.get(id) || projectionMeta.get(id) || null
         if (meta && meta.title) authorityTitleCache.set(id, String(meta.title))
       }
     }
-    // 血缘分类（issue #6 + T1/3.7.0）：结构分类（子代理 / fork 分支）来自 list
-    // snapshot 的 header，零解码。空白（empty）是**三态**：null=未知（等后台
-    // refine 队列精判）、true/false=已判定（来自进程内缓存或 empty-scan 持久层，
-    // sz 指纹一致 + 14 天 TTL 内才可信）。请求路径零解码承诺由此完整成立：
-    // 超过解码上限的日志「必有内容」按事实直接给 false；legacy 无 sizeBytes
-    // 观测 → 永不候选、恒未知（与旧行为一致）。普通会话只在真判空时建条目，
-    // 「误隐藏」在结构上不可能来自体积法（该路径已整体退役）。
+    // 血缘分类（issue #6 + T1/3.7.0 + 3.8.1）：结构分类（子代理 / fork 分支）来自
+    // list snapshot 的 header，零解码。空白（empty）是**三态**：null=未知（等后台
+    // refine 队列精判）、true/false=已判定（来自进程内缓存、empty-scan 持久层
+    // ——sz 指纹一致 + 14 天 TTL 内才可信——或官方投影的 blank 预筛）。
+    // 请求路径零解码承诺由此成立：超过解码上限的日志「必有内容」按事实直接给 false；
+    // legacy 无 sizeBytes 观测 → 永不候选、恒未知（与旧行为一致）。普通会话只在
+    // 真判空时建条目，「误隐藏」在结构上不可能来自体积法（该路径已整体退役）。
     const lineage = {}
     const refineWanted = []
     let emptyStore = null
@@ -1796,9 +1924,14 @@ export function apply(ctx) {
     for (const entry of entries) {
       const id = String(entry.id)
       const size = entry && Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null
+      const hints = hintsById.get(id) || null
       const candidate = emptyScanCandidate(size)
       let verdict = null
-      if (!candidate) {
+      // 单向预筛：官方投影确认过 turn/start ⇒ 必有内容，这一次解码可以省掉。
+      // 反方向不成立（blank===true 仍要事件精判），理由见 projection-hints.js。
+      if (hints && hints.blank === false) {
+        verdict = false
+      } else if (!candidate) {
         if (size !== null) verdict = false // 超出解码上限 = 必有内容（事实，不是猜测）
       } else {
         const mem = emptyScanCache.get(id)
@@ -2091,10 +2224,47 @@ export function apply(ctx) {
       }
     }))
 
+    // 客户端会随能力探测上报它实际启用的「会话 ⋯ 菜单」通道。回显在这里，
+    // 排障时不必打开 devtools 就能判断「菜单三项没出来」到底是因为走了旧 DOM
+    // 路径、还是注册压根没发生（issue #28 的定位成本就花在这上面）。
+    let clientMenuProbe = null
+    // 界面自证：设置左导航图标数、侧栏行数、展开按钮数、关键令牌的解析值。
+    // 只收计数与短字符串，绝不接收标题/正文；字段全部白名单化，避免把任意
+    // JSON 回显出去。
+    let clientUiProbe = null
+    const uiProbeNumber = (probe, key) => {
+      const v = probe[key]
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1e6 ? Math.round(v) : null
+    }
+    const uiProbeText = (probe, key) => (typeof probe[key] === 'string' ? probe[key].slice(0, 40) : null)
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: '/archived-sessions/capabilities',
-      handler: async (req, res) => json(res, { ...capabilities, buildStamp: BUILD_STAMP }),
+      handler: async (req, res) => {
+        try {
+          const body = await readJsonBody(req)
+          const mode = body && typeof body.menuMode === 'string' ? body.menuMode : null
+          if (mode) clientMenuProbe = { mode, at: Date.now() }
+          const probe = body && body.uiProbe && typeof body.uiProbe === 'object' ? body.uiProbe : null
+          if (probe) {
+            clientUiProbe = {
+              navSection: uiProbeNumber(probe, 'navSection'),
+              navIcons: uiProbeNumber(probe, 'navIcons'),
+              navOwn: uiProbeNumber(probe, 'navOwn'),
+              navFallback: uiProbeNumber(probe, 'navFallback'),
+              navIconRenders: uiProbeNumber(probe, 'navIconRenders'),
+              sessionRows: uiProbeNumber(probe, 'sessionRows'),
+              workspaceRows: uiProbeNumber(probe, 'workspaceRows'),
+              overflowRows: uiProbeNumber(probe, 'overflowRows'),
+              stateDots: uiProbeNumber(probe, 'stateDots'),
+              tokenBgLayer2: uiProbeText(probe, 'tokenBgLayer2'),
+              tokenWarn: uiProbeText(probe, 'tokenWarn'),
+              at: Date.now(),
+            }
+          }
+        } catch (e) { /* 老客户端不带 body：保留上一次记录 */ }
+        json(res, { ...capabilities, buildStamp: BUILD_STAMP, clientMenu: clientMenuProbe, clientUi: clientUiProbe })
+      },
     }))
 
     // 活跃会话心跳（客户端 → host）。0.1.7+ 起 host 无从得知 UI 当前选中了哪个

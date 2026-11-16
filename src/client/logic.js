@@ -1,27 +1,8 @@
 // dsh-sessions-manager — client 纯判定逻辑。
 //
-// 侧栏增强里最容易随 DSH 上游变化出回归的三块判定抽到这里：
-// 状态点语义、拖拽可放置校验、fiber node → 会话/工作区识别。
+// 侧栏增强里最容易随 DSH 上游变化出回归的两块判定抽到这里：
+// 拖拽可放置校验、fiber node → 会话/工作区识别。
 // 本模块不碰 DOM，node --test 直接可测（tests/client-logic.test.js）。
-
-// 状态点语义：manual 未读最高优先；done 在当前查看的行上不亮绿
-// （读过即视为已读）。返回逻辑态名，颜色映射留在 UI 层。
-// 历史回归：DSH 曾把 running 报为 ongoing（9766476），上游枚举变化要盯这里。
-// issue #4：上游还存在 waiting / needs-attention 等同义词，这里收敛到同一
-// 逻辑态，颜色映射仍由 UI 层统一处理（issue 保持 open 直到上游确认）。
-export function dotStateFor({ manualUnread = false, dataState = '', isActive = false } = {}) {
-  if (manualUnread) return 'manual'
-  switch (dataState) {
-    case 'ongoing':
-    case 'running': return 'running'
-    case 'warning':
-    case 'waiting':
-    case 'needs-attention': return 'feedback'
-    case 'error': return 'error'
-    case 'done': return isActive ? null : 'done'
-    default: return null
-  }
-}
 
 // 权威标题只修正新出现 DOM 行的冷态标题。行一旦完成首次 paint，后续文本
 // 变化属于 DSH Core 的实时更新（例如重命名），插件不得再用轮询快照覆盖。
@@ -441,9 +422,43 @@ export function tagDeleteConfirm(name) {
   return `删除标签「${String(name == null ? '' : name) || '(未命名)'}」？只删标签，不会删除会话；打过这个标签的会话只是失去它。`
 }
 
+// issue #29：工作区筛选除了「全部」和真实路径，还要能表达两类「没有可用工作区」
+// 的会话。工作区路径一定是绝对路径，所以这两个哨兵不会和真实工作区撞车；它们
+// 是非空字符串，因此能原样进「保存筛选」的 workspace 字段（口径见下方注释）。
+//   · 未分组     = 完全没有工作区路径 → 面板 chip 显示「未分组」
+//   · 工作区已删 = 有路径、但该路径已不在工作区注册表里 → chip 显示「工作区已删 · X」
+// DSH 侧栏把这两类都归进「未分组」组；但面板自己的 chip 是分开的，筛选也拆成
+// 两项——否则选「未分组」却列出一整屏「工作区已删 · X」的卡片，自相矛盾。
+export const WS_UNGROUPED = '__ungrouped__'
+export const WS_GONE = '__workspace_gone__'
+
+/**
+ * 工作区筛选谓词：把「全部 / 未分组 / 工作区已删 / 具体路径」四种口径收敛到
+ * 一处，client 侧只管调用（口径可单测，别在渲染管线里散落条件）。
+ *
+ * `hasWorkspace` / `workspaceGone` 由 host 侧 buildItem 给出（src/index.js:
+ * `workspaceGone: !!(cwd && !ws)`、`hasWorkspace: !!cwd`）；字段缺失时按
+ * workspacePath 兜底，保证旧数据/手造数据也能筛。
+ *
+ * @param {object|null|undefined} item /archived-sessions/sessions 的一行
+ * @param {string} [workspaceFilter='all']
+ * @returns {boolean}
+ */
+export function matchWorkspaceFilter(item, workspaceFilter = 'all') {
+  const sel = typeof workspaceFilter === 'string' && workspaceFilter ? workspaceFilter : 'all'
+  if (sel === 'all') return true
+  const it = item && typeof item === 'object' ? item : {}
+  const path = typeof it.workspacePath === 'string' ? it.workspacePath : ''
+  const hasPath = typeof it.hasWorkspace === 'boolean' ? it.hasWorkspace : !!path
+  if (sel === WS_UNGROUPED) return !hasPath
+  if (sel === WS_GONE) return hasPath && !!it.workspaceGone
+  return path === sel
+}
+
 // 已存筛选快照的字段域：视图与排序必须落在已知枚举里，否则应用一个不存在的
 // 视图会把面板带进没有 tab 的状态。workspace 只验「非空字符串」——工作区可能
-// 已删，删了也允许恢复（筛选结果为 0 行，用户可理解）；tag 允许 ''（=全部）。
+// 已删，删了也允许恢复（筛选结果为 0 行，用户可理解）；#29 的两个哨兵同样
+// 是非空字符串，因此保存/还原天然支持，无需额外枚举；tag 允许 ''（=全部）。
 const SAVED_VIEWS = ['all', 'active', 'archived', 'starred', 'empty', 'trash']
 const SAVED_SORTS = ['newest', 'oldest', 'title']
 
@@ -528,8 +543,9 @@ export function collapsedVisibleTotal(groupCount, trashInGroup) {
 
 // 本组已渲染的可见会话行数。`rows` 是直接子节点里会话行的描述
 // （{ id, pluginHidden }），`visibleIds` 是「上游会列出且插件不会藏」的 id 集合。
-// 插件隐藏的行（回收站 / 空白）与不在集合里的行（空白会话 / 上游过滤口径差异）
-// 都不计入 —— 与 `remainingRows` 的「可见总数」保持同一口径。
+// 插件隐藏的行（回收站 / 墓碑 / 空白）与不在集合里的行（空白会话 / 上游过滤
+// 口径差异）都不计入 —— 与 `remainingRows` 的「可见总数」保持同一口径。
+// 3.8.1 起空白行的例外只有「当前会话」：它不藏也不扣（见 paint 里的说明）。
 export function countRenderedVisible(rows, visibleIds) {
   if (!Array.isArray(rows) || !visibleIds || typeof visibleIds.has !== 'function') return 0
   let n = 0
@@ -542,8 +558,8 @@ export function countRenderedVisible(rows, visibleIds) {
 
 // 空分组判定：`group.sessions` 里「还会出现在侧栏」的条数。
 // - 空白会话不计：上游 `watermarkRows` 里 `if (session.blank) return true`，
-//   空白行永远保留、从不计入可展开数；插件也一律把它藏起来。
-// - `hiddenIds` = 回收站 / 墓碑 / 空白血缘的行 id（与展开计数同一份口径）。
+//   空白行从不计入可展开数；插件这层同样藏掉空白行（当前会话除外，见 paint）。
+// - `hiddenIds` = 回收站 / 墓碑 / 被插件藏起来的空白行 id（与展开计数同一口径）。
 // - 返回 null 表示**不知道**（拿不到数据层，或该组还没加载出会话）：调用方
 //   必须按「非空」处理——宁可留一个空标题，也不能把仍有会话的组藏掉。
 export function aliveSessionCount(sessions, hiddenIds) {
@@ -561,6 +577,18 @@ export function aliveSessionCount(sessions, hiddenIds) {
   }
   // 一条带 id 的都没有 = 结构不认识（不是「组空」），照未知处理。
   return seen === 0 ? null : alive
+}
+
+// 空分组隐藏的最终裁决：`containsCurrent` 是上游分组节点上的既有字段
+// （`containsCurrent: g.key === currentGroup`，0.1.5 起各代都在），表示当前会话
+// 是否就住在这个分组里。
+// - 当前会话在本组 → 绝不藏。藏掉它等于同时藏掉用户此刻的位置与「+ 新建对话」
+//   入口；3.8.1 起连当前会话那一条 blank 行也不再被插件隐藏（与上游同口径），
+//   但 `aliveCount` 依旧按「非 blank」统计，所以这层否决必须保留。
+// - `aliveCount` 沿用 aliveSessionCount 的三态纪律：null=不知道 → 不藏。
+export function shouldHideEmptyGroup(aliveCount, containsCurrent) {
+  if (containsCurrent === true) return false
+  return aliveCount === 0
 }
 
 // 拖拽自动滚动：光标进入滚动容器上/下感应带时每帧该滚多少（负=向上，正=向下，0=不动）。

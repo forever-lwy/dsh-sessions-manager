@@ -1,8 +1,8 @@
+> forever-lwy fork: `@forever-lwy/dsh-sessions-manager` 3.8.101, based on upstream 3.8.1. Keeps the shared DOM hub, event-driven catalog refresh and user-message trash restoration. Install `github:forever-lwy/dsh-sessions-manager`; source on `master`, prebuilt packages on `release`.
+
 # dsh-sessions-manager
 
-> **Possibly the most stable and polished session manager available for DSH today.**
-
-> 中文 | English
+> [中文](./README.md) | English
 
 ![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-sessions-manager?style=flat-square&color=facc15)
 ![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-sessions-manager/total?style=flat-square&color=14b8a6)
@@ -10,94 +10,196 @@
 ![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-sessions-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![DSH plugin](https://img.shields.io/badge/DSH-plugin-4d6bfe?style=flat-square)
 
-> DSH session manager: archive, move, restore, and inspect sessions **and their lineage** (subagent folding, branch badges, empty-session cleanup) from **Settings → 会话管理**; mark unread, move, and delete sessions directly from the **main sidebar**, with subagents folded in place under their parents. Deleted sessions go to the recycle bin first and can be restored or permanently purged.
+DSH gives you exactly one way to close out a session: archive it. You can't delete one, can't move it to another workspace, can't tell which session spawned which, and have no idea which forgotten conversation is sitting on a few hundred megabytes of disk.
 
-A persistent DSH plugin (host + browser halves) covering both the **settings panel** and the **main sidebar**, so frequent session actions don't require opening Settings. It understands both legacy header lists/`readFrom` and the new snapshot/`SessionHandle` API, enabling actions according to the current Runtime's verified capabilities. Purge and migration paths are enabled only when they can be verified — on newer runtimes they are backed by guarded path derivation and write-ownership probes; anything unverifiable is disabled in both UI and Host to prevent false success.
+This plugin fills those gaps. A new panel under Settings, three extra items in the sidebar's session ⋯ menu. Deletes land in a recycle bin first, so a wrong click is recoverable. Moving a session across workspaces no longer means starting a new conversation. Subagents and forks become visible, and empty sessions can be cleaned up in bulk. Reads and writes go through DSH's official surface. The host isn't forked or patched.
 
-## Features
+## Install
 
-### Settings panel: Session Manager
+```sh
+dsh plugin --profile desktop add dsh-sessions-manager
+```
 
-- **Unified panel**: three always-visible top-level views — **All / Active / Archived** — while the low-frequency ones (**Starred / Empty / Recycle bin**) are tucked behind an arrow button at the end of the filter row and slide out horizontally on click (they stay expanded automatically while a low-frequency view is selected). Search across title, session ID, and workspace, plus workspace filters and creation-time/title sorting. The result line is a single sentence such as "Showing 5 sessions, 4 more subagents folded under their parents". A maintenance row below the filters holds the **Storage usage**, **Manage tags** and **Auto-archive** tools, which expand on demand instead of taking up a view.
-- **Starred sessions**: an always-visible star button on each session row toggles starring optimistically with rollback on failure; the Starred view is orthogonal to DSH's active/archived states and they stack. The star index is plugin-owned (schema v3) and never touches DSH logs; stars are cleaned up automatically when a session is permanently purged.
-- **Tags & saved filters**: label sessions with custom tags (up to 200 global, 10 per session; rename, merge, delete — **deleting a tag never touches the sessions**), filter the list by tag, and save the current "view + workspace + sort + tag" combination as a preset (up to 20) for one-click reuse. Tags and presets live in plugin-owned indexes (same discipline as the star index) inside this machine's DSH data directory — they do not follow your account.
-- **Cold-title synchronization**: the sidebar is corrected from the latest log-backed `session/title`, so renamed cold sessions no longer need to be opened before showing their current name. On cold starts of large stores a title that is not ready yet simply renders blank while it fills in the background — and once it arrives, **rows already on screen and the “⑂ branch” chip's tooltip update automatically**, no page rebuild needed.
-- **Sidebar workspace drag-and-drop**: drag a session onto a workspace heading to move it, with a highlighted drop target, same-workspace protection, failure feedback, and the More → Move session menu retained for keyboard access. Holding the drag near the list's top or bottom edge auto-scrolls the sidebar (faster the closer you get, stopping at either end), so a workspace heading outside the viewport is still reachable.
-- **Archive / Restore**: archive hides a session from the sidebar; restore unarchives it and puts it back into its original workspace group.
-- **Move to a workspace**: pick an **existing workspace**, or enter a **new directory path** (auto-created); the new-path mode also lets you open the **native OS directory picker** with a **「浏览…」** button. The session's working directory and log are migrated together. On the legacy runtime (`0.1.2-rc.1`) even an open session can be moved immediately; on newer runtimes session logs are **single-writer** (DSH claims write ownership when it opens a session and releases it only at process exit), so such a move is **queued automatically** instead of failing and completes on its own once the session is released — see "Moving an active session (queued moves)" below.
-- **Session details**: expand any session to see **disk usage**, **turns / steps / user·assistant messages / tool calls / image attachments** stats, **tool-usage breakdown**, **search·fetch records**, the **write/edit file list** (already filtered for paths that no longer exist on disk), and **lineage** (parent session / child sessions / subagents).
-- **Lineage disclosure**: the panel's **Grouping** select offers **Lineage (folded groups, default)** and **Flat (all inline)** views. Under lineage grouping, subagent sessions fold under their parents ("▸ N 子代理"), and sessions forked from the same source are **gathered into branch groups** ("▸ N 分支", oldest first by creation time; the source row stays in place, and if the parent is filtered out / archived / deleted the group degrades to a "来源：<短 ID>" header — no row is ever lost, so branches of an archived parent do hang under a "source" header in the Active view by design). Grouping lives in the panel; the sidebar only badges rows (React-owned DOM, never reordered). Subagent sessions likewise never occupy top-level rows: under lineage grouping they are excluded from the **All / Active / Archived / Empty** counts, from select-all, and only exist as the parent row's "N 子代理". Subagents whose parent is not in the current list (deleted / archived / filtered out) are collected into a single **"未归属的子代理会话"** card at the end of the list (collapsed by default; expand to open / archive / delete each of them — a search hit auto-expands it), instead of flooding the list with untitled rows. Switching to **Flat** keeps parity with native DSH: subagents sit inline and can be selected individually. Fork sessions also carry the green **"⑂ 分支"** badge (hover shows the source parent; the title is late-arriving data and refreshes itself), and empty sessions carry a gray badge with a dedicated **Empty** view for reviewing and cleaning them up. Empty sessions are identified by an **event-type method**: since `0.1.3` the log header grew and every creation writes a lifecycle-metadata frame, so the old size threshold no longer holds — the plugin decodes candidate sessions through the official API and marks one empty only when no content event exists beyond the header (decode failures fall back to non-empty); **plugin-injected context does not count as content** — an `agent/inbox/spliced` that only inserts messages whose `source.kind` starts with `plugin:` or whose `form` is `'instructions'` (and removes nothing) leaves the session empty, while real user messages and unrecognized payloads still count. Since 3.7.0 the checks run entirely off the request path: sidebar data answers immediately with empties marked "unknown" (unknown is never hidden and never counted as empty), a small background queue resolves candidates session by session, verdicts persist across restarts, and later polls converge automatically — zero-decode lineage such as the "⑂ branch" chip is no longer gated behind any refinement work.
-- **Export**: the detail panel offers two actions — "**Download raw log (ZIP)**" goes straight to DSH's official `session.export` endpoint (subsessions + attachments included, hidden automatically when the persistence backend lacks raw-artifact support); "**Export Markdown**" renders the session into a human-readable transcript (front matter + per-turn sections + user / assistant / tool-call summaries, with no streaming-delta duplication).
-- **Storage analysis**: a **Storage usage** button in the maintenance row expands on demand to aggregate per-workspace disk usage of session logs (share bars + session counts) and list the Top 10 largest sessions. Read-only statistics that never modify any data; collapsed by default, so nothing is scanned until you open it.
-- **Auto-archive**: optionally move sessions that have been **inactive for 30 / 60 / 90 days** into **Archived**, **off by default**. The session you are currently using and any starred session (that guard can be turned off) are never auto-archived; it only sets an archived flag and never deletes data, so recovery is always one click away. The check is lazily triggered when you open the panel, at most once per day, and can also be run manually with "Check now".
-- **Batch multi-select**: select-all / archive selected / restore selected / delete selected (single confirmation for batch delete). **Select-all only covers rows that actually render and can be checked one by one** — folded subagents, gathered branch members and "source" headers are excluded, so nothing invisible is ever selected; batch delete cascades to subagents the same way and says how many it carried along. Once anything is selected, the batch action bar **pins to the top** of the panel (sticky), so a long list never forces you to scroll back up to act; a **"Move selected…"** action adds batch cross-workspace moves (reusing the single-move sheet: existing workspace / new directory / native directory picker). One failing session never blocks the rest — failures are reported one by one.
+Restart DSH afterwards. Settings → 会话管理 and the sidebar's session ⋯ menu are there.
 
-### Main sidebar: session ⋯ menu augmentation
+Two other ways in:
 
-- **Mark unread**: adds a **「标记未读 / 标记已读」** toggle at the top of each session's ⋯ menu; you can also click the status dot to toggle. The mark is automatically cleared when you open the session.
-- **Move session**: opens a hover submenu to the right listing workspace names; choose one to move the session there. The current workspace is labeled "当前" and disabled.
-- **Delete session**: deletes the session into the **recycle bin** (not an immediate physical delete); you can restore or permanently purge it from the Session Manager panel.
+```sh
+# track the latest commit on main
+dsh plugin --profile desktop add "github:forever-lwy/dsh-sessions-manager"
 
-### Main sidebar: subagent folding and branch badges
+# working on the source locally (clone, then link)
+git clone https://github.com/TOBYCAI/dsh-sessions-manager.git
+dsh plugin --profile desktop add link:/path/to/dsh-sessions-manager
+```
 
-- **Subagent folding**: DSH's upstream sidebar intentionally never renders subagent rows, so the plugin injects them **in place** under their parent session using the official lineage fields (`origin: 'subagent'` / `parentSession` / `delegationDepth`). A **"▸ N 子代理"** badge appears when the parent row is selected or hovered; clicking it expands the indented subagent rows, and clicking a row opens that subagent via the official API. The folded list shrinks as soon as a subagent is deleted.
-- **Branch badges**: sessions created by forking a parent show a green **"⑂ 分支"** (branch) chip when their row is selected or hovered, hinting at their lineage.
-- **Empty sessions**: since `0.1.3` the upstream sidebar doesn't render empty sessions; the plugin hides them too as the fixed default, so managing them lives in the panel's **Empty** view.
+On `dsh web` too? Run the same thing with `--profile web`.
 
-### Main sidebar: status dots
+To remove it: `dsh plugin --profile desktop remove @forever-lwy/dsh-sessions-manager`. No session log is touched. Sessions deleted through this plugin still sit in DSH's Archived section and can be restored from there.
 
-A small dot is rendered to the left of each session row. Its color is driven by DSH's native `StateDot` state:
+## What you get
 
-| Color | State | Description |
+| Where | What's added |
+|---|---|
+| Sidebar session ⋯ menu | Mark unread, move session, delete session |
+| Sidebar parent rows | "▸ N 子代理" folding, a green "⑂ 分支" badge |
+| Settings → 会话管理 | Every session, with search, filters, details and batch actions |
+| Same panel → Recycle bin | Deleted sessions, restorable or purgeable |
+
+## Sidebar
+
+### The ⋯ menu
+
+Three items, slotted between DSH's own by risk. Pin, rename, fork, copy Session ID and archive stay exactly as they were.
+
+- **Mark unread** (top). The status dot turns blue, and the mark clears itself when you open the session. The blue dot is clickable too, and clicking it clears the mark.
+- **Move session** (below Archive). A workspace list opens to the right; pick one and it moves. The workspace it's already in is labeled "当前" and can't be picked.
+- **Delete session** (bottom, in red). Goes to the recycle bin, not an immediate physical delete.
+
+Since `0.2.2` the host renders this menu in a portal, so walking up the DOM no longer reaches the session row. The plugin registers through the official `ctx.contextMenus.register({ target: 'session' })` instead. The session id is handed over by the host, and nothing depends on DOM shape. On `0.1.7` through `0.2.1`, where that service doesn't exist, it falls back to DOM injection.
+
+### Dragging to another workspace
+
+Besides the menu, you can drag a session row onto a workspace heading and drop it there. The target highlights, dropping it back where it came from is refused, and failures report themselves.
+
+Hold the drag near the top or bottom edge of the sidebar list and it scrolls. It speeds up the closer you get and stops at either end, which puts a workspace heading outside the viewport within reach.
+
+### Subagents and branches
+
+DSH's sidebar deliberately doesn't render subagent rows. The plugin reads the official header fields (`origin: 'subagent'`, `parentSession`, `delegationDepth`) and injects those rows under their parent: a "▸ N 子代理" badge shows up when the parent row is selected or hovered, clicking it expands the indented children, clicking a child opens that subagent through the official API. Delete a subagent and the folded list shrinks with it.
+
+Forked sessions carry a green "⑂ 分支" badge; hover to see which session they came from.
+
+The sidebar only badges rows, it doesn't reorder them. Those rows are owned by the host's React tree, and rearranging things underneath it goes out of sync fast. For a grouped tree, use the settings panel.
+
+### Titles on a cold start
+
+Sidebar titles aren't read from logs on the spot. Since `0.2.2` they come from the runtime's persisted projection cache, which reads the header and nothing else, so a historical session you never opened still shows its title. A genuine miss renders blank first and fills in from a background queue; once it lands, rows already on screen and the "⑂ 分支" chip's tooltip update themselves without waiting for a rebuild. On older runtimes the plugin corrects the cache from the latest `session/title` in the log, so a rename shows up without opening the session either.
+
+### Status dots
+
+Running, waiting on you, finished-unread and errored: those four dots are still drawn by DSH's own `StateDot`. The plugin doesn't repaint them or cover them. It adds one state DSH doesn't have:
+
+| Dot | State | Notes |
 |---|---|---|
-| 🔵 Blue | Manually marked unread | Toggle via the ⋯ menu or by clicking the dot; auto-cleared when the session is opened |
-| 🟡 Yellow | Working | The session is currently running (`ongoing`, with legacy `running` compatibility) |
-| 🟠 Amber | Awaiting feedback | The session has a follow-up question and is waiting for your input or confirmation (`warning`) |
-| 🟢 Green | Completed but unread | The session is done (`done`) but you haven't reopened it yet; disappears after you view it |
-| 🔴 Red | Error / needs attention | The session hit an error (`error`) |
-| No dot | Completed and read / idle | — |
+| 🔵 Blue | Manually marked unread | Set from the ⋯ menu; cleared when you open the session, or by clicking the dot |
 
-The plugin hides DSH's own status dot and re-renders it using the palette above, so the two dots never overlap.
+The blue dot takes the same slot (the native dot steps aside for the moment) and the native dot is back the instant you clear the mark.
 
-### Recycle bin
+## Settings panel
 
-- The **Recycle bin** is a dedicated Session Manager view with item counts and deletion dates.
-- Normally deleted sessions land in the recycle bin first; they are **not removed from disk immediately**, and they won't be grouped under "未分组".
-- Inside the recycle bin you can **restore** a session (back to its original workspace) or **permanently delete** it (physically remove the log).
-- **Deleting a parent session takes its subagents with it**: the whole subagent subtree moves to the recycle bin by default (subagent lifetime follows the parent), and the delete dialog can opt out to keep them. Restoring or purging the parent cascades the same way, so no parentless orphan is left in the recycle bin — while a subagent you deleted on its own is never re-adopted by its parent (restoring the parent will not bring it back).
-- **Empty recycle bin** removes all items at once.
-- Keep items forever or automatically purge them after 7 / 30 / 90 days, and verify that their log files are intact.
-- The recycle-bin index uses a versioned schema, serialized mutations, and atomic writes; legacy array indexes migrate automatically.
-- Permanently deleted sessions stay hidden forever and won't reappear in the sidebar or session list.
-- Permanent deletion writes a host-side tombstone first, waits for the live Session and persistence controller to retire, removes the log, and rebuilds workspace indexes, preventing stale indexes, reconnects, or an empty Ungrouped section from resurfacing.
+### Browsing and search
 
-### Moving an active session (queued moves)
+Three views sit at the top permanently: All, Active, Archived. Starred, Empty and Recycle bin live behind an arrow at the end of the row and slide out sideways. The common ones stay out front; the rare ones stay out of the way. A low-frequency view stays expanded while it's selected.
 
-Since DSH 0.1.5 every session log has a **single-writer lock**: once a session is open in DSH (even just selected as the current conversation) the agent loop owns its write handle. **The host exposes no "close session" action and no way to release that ownership — it is released only when the DSH process exits** (switching away does not release it, and empirically neither does idle waiting). Forcing the move at that point is dangerous: the live writer keeps appending to the old file and re-materialises a shell at the old path.
+Search matches title, session ID and workspace name. The workspace dropdown lists your real workspaces plus two special ones: "未分组" for sessions with no workspace, and "工作区已删" for sessions whose workspace directory is gone. Same meaning as the chips on the cards. Sort by creation time or title.
 
-So held-open sessions get **deferred (queued) moves**:
+Above the list there's a single sentence telling you what you're looking at, like "Showing 5 sessions, 4 more subagents folded under their parents".
 
-- The request does not fail; the move is recorded in a pending queue (`~/.dsh/sessions-manager/pending-moves.json`) and the plugin reports **"queued" honestly** — it never claims "moved" for a move that did not happen.
-- The queue runs automatically **immediately after plugin startup and retries densely** (0 / 1 / 3 / 6 / 12 / 30 s — it must win the race against the browser opening sessions), then on a light 2-minute fallback, and whenever the host releases a session.
-- Up to 50 entries are kept; an entry that fails 5 times for **non-lock** reasons is dropped and logged (failures within the first 30 s after startup do not count, so a startup race cannot silently drop your queue).
-- Inspect / cancel: `POST /archived-sessions/pending-moves`, `POST /archived-sessions/pending-moves/cancel { sessionIds }`; while the queue is non-empty the panel also shows a **Pending moves queue** section with per-entry cancel.
-- **Results are no longer silent**: a background completion or a final give-up (5 consecutive non-lock failures) becomes a persisted notice, surfaced as a toast the next time a DSH page is open (give-ups include the reason). Notices stay on the server until acknowledged (up to 20, at most 7 days) — closing the page before the toast never loses one.
-- **To actually move an active session**: request the move (it queues), then **restart DSH and don't open that session first** — it completes a few seconds after startup. Pending entries survive restarts.
+Under the filter row sits a strip of maintenance buttons: storage usage, tags, auto-archive. They only take up room once opened.
 
-### Session formats v3 / v4 (DSH 0.1.5+ / 0.1.7+)
+### Session details
 
-DSH 0.1.5 upgrades the session log format to **v3**, and 0.1.7 upgrades it again to **v4**; the runtime performs the migration itself while reading:
+Expand a session to see:
 
-- Migration is **automatic** and **keeps the original files** — so one session directory legitimately holds multiple generations side by side (`session.v2.jsonl.zstd` next to higher generations). This plugin always reads the **highest generation**, matching the runtime.
-- Migration is **one-way, with no downgrade read**: after opening sessions on a newer runtime, rolling the runtime back makes those sessions unreadable. Back up `~/.dsh/sessions` before a rollback.
-- Only **supported** old logs are migrated; unknown events or corrupted data are **refused without any repair**. Such sessions surface as `SessionFormatUnsupportedMigrationError` / `SessionFormatError` on read/move — the plugin cannot repair them and reports the error verbatim.
-- **Since 0.1.7 newly created sessions strictly require a v4 header**: from v3.7.2 this plugin re-samples the session header against the current backend's format during cross-workspace moves — sessions created in older formats (v3 and earlier) can be moved again, and the relocated copy lands directly on the current format (verified end-to-end against a real v3 log). Earlier plugin versions fail to move such sessions on 0.1.7.
-- **0.2.0 is still v4**: the current format version is **probed dynamically** from the backend's format catalog package (never hardcoded), so 0.1.7 and 0.2.0 share one code path.
+- disk usage
+- turns, steps, user / assistant message counts, tool calls, image attachments
+- tool-usage breakdown
+- search and fetch records
+- files touched by write / edit (paths that no longer exist on disk are filtered out)
+- lineage: parent, children, subagents
+
+Two export buttons at the bottom. "Download raw log (ZIP)" goes straight to the official `session.export` endpoint, subsessions and attachments included; the button hides itself when the backend doesn't support it. "Export Markdown" renders the session into something readable: front matter, per-turn sections, user / assistant / tool-call summaries, with streaming deltas deduplicated.
+
+### Lineage grouping
+
+The "Grouping" dropdown has two options:
+
+- **Lineage** (default): subagents fold under their parent, sessions forked from the same source gather into a "▸ N 分支" group.
+- **Flat**: same as native DSH. Subagents sit inline and can be selected one by one.
+
+A few rules worth knowing while you're in lineage view:
+
+- Branch groups are ordered by creation time, oldest first, and the source row stays where it was.
+- When the parent is filtered out, archived or deleted, the group header degrades to `来源：<short id>` and no row is lost. So a "来源：" header showing up in the Active view is expected, not a bug.
+- Subagents don't take top-level rows: they're left out of the All / Active / Archived / Empty counts and out of select-all.
+- Subagents whose parent isn't in the current list collect into a "未归属的子代理会话" card at the end, collapsed by default and auto-expanded by a search hit. The list never fills up with rows of "(untitled)".
+
+### Batch actions
+
+Once anything is selected you can archive, restore, delete or move in bulk. Archiving takes sessions out of the sidebar; restoring puts them back into their original workspace group.
+
+The action bar pins to the top of the panel, so a long list doesn't make you scroll back up.
+
+Select-all only covers rows that render and can be checked individually. Folded subagents, gathered branch members and "来源：" headers are excluded, so you can't select something you can't see. Batch delete cascades to subagents and says how many it took along.
+
+"Move selected…" reuses the single-move sheet: existing workspace, new directory, or the native directory picker. One failure doesn't block the rest, and each failure is reported on its own.
+
+### Stars, tags, saved filters
+
+Stars are the button that always sits on the left of a session row: click to star, click again to unstar. The UI updates first and rolls back if the write fails. Starred is its own view and stacks with active / archived, so an archived session can be starred.
+
+Tags are for your own classification: up to 200 overall, 10 per session, renameable and mergeable. Deleting a tag removes the tag and its assignments, never the sessions.
+
+"View + workspace + sort + tag" can be saved as a preset, up to 20, restored with one click.
+
+All three live in plugin-owned indexes under this machine's DSH data directory. They don't follow your account and won't sync to another machine. Purge a session and its stars and tag assignments are cleaned up with it.
+
+### Storage usage and auto-archive
+
+**Storage usage** aggregates session-log disk usage per workspace with share bars and session counts, then lists the ten largest sessions. It is read-only, collapsed by default, and computed only when opened, so it never slows the list down.
+
+**Auto-archive** can push sessions untouched for 30 / 60 / 90 days into Archived. Off by default. The session you're currently in and any starred session are never archived (the starred guard can be turned off). It only sets an archived flag and deletes nothing, so it's one click back. The check runs lazily when you open the panel, at most once a day, and there's a "Check now" button.
+
+## Recycle bin
+
+Deleting is a soft delete: the log stays in its original workspace directory and the recycle bin just records an index entry, with the pending count and deletion date shown in the list.
+
+One side effect tends to surprise people: deleting also **writes the session into DSH's native archive**. That way, even with this plugin disabled or removed, those sessions don't reappear in the active list; they stay put under DSH's Archived. Restoring puts the pre-delete state back symmetrically.
+
+What you can do in there:
+
+- **Restore**: back to the original workspace.
+- **Permanently delete**: physically remove the log.
+- **Deleting a parent takes its subagents along**: the whole subtree moves in by default (subagent lifetime follows the parent), and the dialog lets you opt out. Restoring or purging the parent cascades the same way, so no parentless orphans are left behind. A subagent you deleted on its own is never re-adopted by its parent.
+- **Empty the bin**: everything at once. Retention is forever by default, or 7 / 30 / 90 days, and there's a log-integrity check.
+
+Both actions verify that the file is really on disk first. If the recorded path disagrees with the generation actually present, it's corrected from disk; if the target really is gone, or a file survives the unlink, you get an explicit error and **the entry stays**. No "success" while the file is still there.
+
+The bin index is a versioned schema with serialized, atomic writes; older array indexes migrate automatically. A permanent delete writes a tombstone first, waits for the live Session and the persistence controller to retire, removes the log and rebuilds the workspace index. A reconnect, or a host still holding a stale index, can't bring it back or spawn an empty "未分组".
+
+## Two things that aren't obvious
+
+### Moving a session that's currently open
+
+Every session log has a single-writer lock. The moment a session is opened, even by selecting it, the agent loop owns its write handle. The host exposes no "close session" action, and that ownership is released only when the DSH process exits. Switching away doesn't release it. Waiting doesn't either.
+
+Forcing the move at that point is dangerous: the live writer keeps appending to the old file and re-creates a shell at the old path.
+
+So held-open sessions get queued instead:
+
+- The request doesn't fail. The session goes into a queue (`~/.dsh/sessions-manager/pending-moves.json`) and the UI says "queued", which is the truth.
+- The plugin retries densely right after startup (0, 1, 3, 6, 12, 30 s), because it has to win the race against the browser opening those sessions. After that it falls back to every 2 minutes, and fires whenever the host releases a session.
+- Up to 50 entries. An entry that fails five times for **non-lock** reasons is dropped and logged; failures within the first 30 s after startup don't count, so a startup race can't quietly eat your queue.
+- While the queue isn't empty, the panel shows a "待移动队列" section where you can cancel entries one by one.
+- A background completion or a final give-up becomes a notice, surfaced as a toast the next time a DSH page opens (give-ups carry the reason). Notices stay on the server until acknowledged, up to 20 of them and at most 7 days, so closing the page early doesn't lose one.
+
+To get one moved: request the move (it queues), restart DSH, and **don't open that session first**. It completes a few seconds after startup. Unfinished entries survive restarts.
+
+### What counts as an empty session
+
+Since `0.1.3` the log header grew, and creating a session always writes a lifecycle-metadata frame first, so guessing "does it have content" from size no longer works. The plugin looks at event types instead: candidates go through official decoding, and a session is empty only when there is no content event beyond the header. Decode failures count as non-empty, on the principle that keeping one extra beats deleting something real.
+
+One case deserves its own paragraph: **plugin-injected context doesn't count as content**. If an `agent/inbox/spliced` event only inserts messages whose `source.kind` starts with `plugin:` or whose `form` is `'instructions'`, and removed nothing, the session is still empty. Real user messages, and payloads it can't identify, still count.
+
+The check stays off the data path: sidebar data answers on the first tick, emptiness starts as "unknown" (unknown is neither hidden nor counted), a small background queue decides, verdicts persist across restarts, and later ticks converge.
+
+The plugin hides empty rows in the sidebar, but **the current session is never hidden**. A conversation you just created has to be visible. Upstream filters only the rows it already knows are blank and that aren't the current one; for cold sessions with no projection-cache record it treats them as unknown, i.e. non-empty, and this plugin covers the rest. Managing them lives in the panel's Empty view.
 
 ## Screenshots
 
 <details>
-<summary>Expand screenshots (sidebar menu / sidebar subagent folding / settings panel / batch move / empty view / auto-archive / storage analysis / starred / recycle bin / session details)</summary>
+<summary>Expand for the 10 screenshots (sidebar menu / sidebar subagent folding / settings panel / batch move / empty view / auto-archive / storage usage / starred / recycle bin / session details)</summary>
 
 ![Sidebar ⋯ menu: mark unread, move session, delete session](assets/screenshot-session-submenu.png)
 
@@ -121,124 +223,122 @@ DSH 0.1.5 upgrades the session log format to **v3**, and 0.1.7 upgrades it again
 
 </details>
 
-## Install
+## Known limitations
 
-```sh
-# Option 1: install as a Git dependency (recommended — no local clone; restart DSH to apply)
-dsh plugin --profile desktop add "github:TOBYCAI/dsh-sessions-manager"
-
-# For the web UI (if you also use dsh web):
-dsh plugin --profile web add "github:TOBYCAI/dsh-sessions-manager"
-
-# Option 2: local link (for development)
-git clone https://github.com/TOBYCAI/dsh-sessions-manager.git
-dsh plugin --profile desktop add link:/path/to/dsh-sessions-manager
-```
-
-> After installing, **restart DSH** (or refresh the page to reload the bundle). Then Settings → 会话管理 and the sidebar ⋯ menu become available.
-
-## Uninstall
-
-```sh
-dsh plugin --profile desktop remove dsh-sessions-manager
-dsh plugin --profile web remove dsh-sessions-manager
-```
-
-## Structure
-
-```
-package.json       npm metadata + dsh.bundle.patch + dsh.client (browser-half registration)
-cordis.patch.yml   inserts this plugin's row into the profile bundle
-src/index.js       host source (/archived-sessions/* JSON routes)
-src/client/index.jsx  client source (React, settings.section + sidebar DOM augmentation)
-src/auto-archive.js   auto-archive settings (schema v4) + candidate-selection pure functions
-src/storage-stats.js  storage-usage aggregation (pure functions, by workspace / Top N)
-src/lineage.js        lineage classification and empty-session detection (pure functions, event-type method)
-src/empty-scan-index.js persisted empty-verdict cache (cross-restart reuse, fingerprint + TTL gates)
-build.mjs          esbuild build script (regenerates lib/)
-lib/index.js       pre-built host (ESM)
-lib/client.js      pre-built client (ModuleLoader CJS handshake)
-```
-
-The `release` branch includes prebuilt `lib/` bundles for installation from `github:forever-lwy/dsh-sessions-manager`. Development happens on `master`, where `lib/` is ignored and `prepare` remains a source-install fallback. Run `npm ci`, `npm run build`, `npm run check`, and `npm test` in this plugin directory. The user decides when to push a version tag and install the resulting release.
-
-The fork refreshes sidebar metadata on Session lifecycle changes, coalesces bursts, and repairs the persisted catalog after a live instance is disposed. Token streaming does not trigger full-list requests. A real user message sent to a trashed conversation restores it; background replies, generated titles, and plugin context do not undo an intentional deletion. Stale empty-scan hints never hide the selected draft or a native nonblank/running Session.
-
-## Host routes
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/archived-sessions/sessions` | List all sessions (with archived flag) for the Session Manager panel |
-| POST | `/archived-sessions/list` | List archived sessions (skips deleted / non-existent ones) |
-| POST | `/archived-sessions/archive` | Archive (hide) a single session |
-| POST | `/archived-sessions/archive-many` | Archive many |
-| POST | `/archived-sessions/restore` | Unarchive a single session |
-| POST | `/archived-sessions/restore-many` | Unarchive many |
-| POST | `/archived-sessions/delete` | Delete a single session — **moves it to the recycle bin** (not an immediate physical delete); carries the whole subagent subtree by default (`cascadeSubagents: false` keeps them) and returns `cascaded` / `cascadedIds` |
-| POST | `/archived-sessions/delete-many` | Move many sessions to the recycle bin (cascades to subagents per parent, returns the total `cascaded`) |
-| POST | `/archived-sessions/trash/list` | List sessions in the recycle bin |
-| POST | `/archived-sessions/trash/restore` | Restore a session from the recycle bin (restores the subagents that were carried out with it, returns `cascaded`) |
-| POST | `/archived-sessions/trash/purge` | Permanently delete a single session in the recycle bin (cascades to the same carried-along entries, returns `cascaded`) |
-| POST | `/archived-sessions/trash/purge-many` | Empty / batch permanently delete recycle-bin sessions (cascades per parent) |
-| POST | `/archived-sessions/trash/settings` | Read or update automatic cleanup `{ retentionDays }` |
-| POST | `/archived-sessions/trash/verify` | Verify that recycle-bin logs still exist |
-| POST | `/archived-sessions/workspaces` | List available target workspaces |
-| POST | `/archived-sessions/move` | Move a session to a target workspace `{ sessionId, targetPath }`; when the session is held open by DSH it returns `{ queued: true }` and queues the move |
-| POST | `/archived-sessions/move-many` | Batch cross-workspace move `{ sessionIds, targetPath }` — one failure never blocks the rest, failures are reported per session, held-open sessions land in `queued`, and the grouping index is rebuilt once at the end |
-| POST | `/archived-sessions/pending-moves` | Inspect the pending-move queue (sessions queued while held open; completed automatically once released) |
-| POST | `/archived-sessions/pending-moves/cancel` | Cancel queued moves `{ sessionIds }` |
-| POST | `/archived-sessions/pending-moves/notices/ack` | Acknowledge queued-move outcome notices (cleared once shown; unacknowledged ones live at most 7 days) |
-| POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
-| POST | `/archived-sessions/sidebar-state` | Authoritative sidebar titles, recycle-bin IDs, permanent-deletion tombstones, **lineage disclosure** (subagent / branch / empty badges), , `warmPending` / `refinePending` (whether the title-warming and empty-refinement background queues still have work in flight) and `moveNotices` (queued-move outcome notices; omitted when empty) |
-| POST | `/archived-sessions/lineage-tree` | Recursive subagent tree (feeds the panel's Lineage grouping and the sidebar folding), filtered for recycle-bin and tombstoned sessions |
-| POST | `/archived-sessions/star/set` | Star / unstar sessions `{ sessionId or sessionIds, starred }` |
-| POST | `/archived-sessions/tags/list` | Tag definitions + session→tag map `{ tags, assignments }` |
-| POST | `/archived-sessions/tags/create` | Create a tag `{ name }` (duplicate/over-cap rejected with stable codes) |
-| POST | `/archived-sessions/tags/rename` | Rename `{ id, name }` (id is stable) |
-| POST | `/archived-sessions/tags/merge` | Merge `{ fromId, toId }` (deduped; source tag disappears) |
-| POST | `/archived-sessions/tags/delete` | Delete a tag `{ id }` (definitions + assignments only, never sessions) |
-| POST | `/archived-sessions/tags/set` | Replace one session's tags wholesale `{ sessionId, tagIds }` |
-| POST | `/archived-sessions/filters/list` / `save` / `delete` | Filter presets `{ name, filters }` (≤20; filters is an opaque payload) |
-| GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |
-| POST | `/archived-sessions/storage` | Storage-usage aggregation (per-workspace ranking + largest sessions) `{ topN }` |
-| POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
-| POST | `/archived-sessions/auto-archive/run` | Run a one-off auto-archive check immediately (ignores the daily throttle) |
-| POST | `/archived-sessions/capabilities` | Report the persistence generation and per-action read/archive/trash/purge/cross-workspace-move capabilities |
-
-> Deleting a session moves it to the recycle bin by default; only "permanently delete" inside the recycle bin physically removes the log. Permanently deleted sessions are hidden forever on the client side so they don't reappear in the sidebar or "ungrouped" due to DSH runtime caching.
+- **An open session can't be moved without a restart.** Upstream doesn't release write ownership, so it queues until the process exits.
+- **Rolling the runtime back makes recently opened sessions unreadable.** Log migration is one-way: once a session has been opened on a newer runtime, an older one has no decoder for it. Back up `~/.dsh/sessions` before a rollback. Migration keeps the original files, so a session directory legitimately holds `session.jsonl.zstd` next to a higher-generation `session.vN.jsonl.zstd`; the plugin reads the highest generation actually on disk.
+- **Corrupted old logs can't be repaired.** The runtime migrates supported old logs only, and refuses unknown events or damaged data without repairing anything. Those sessions surface as `SessionFormatUnsupportedMigrationError` or `SessionFormatError`. The plugin has no repair path and reports what it sees.
+- **The sidebar doesn't reorder.** Subagent rows are injected, not sorted into a new tree. See above.
+- **Empty detection leans conservative.** Decode failures count as non-empty, which is deliberate, so the Empty view may miss a few genuinely empty sessions.
+- **Deleting also writes DSH's native archive.** It's what keeps DSH's own ledger in agreement and stops sessions from coming back after you uninstall. If you want one gone for good, purge it from the recycle bin.
+- **Stars, tags and presets are per machine.** They live in the local DSH data directory and don't sync to your account.
+- **Older runtimes expose less.** On `0.1.5` and earlier only operations that can be verified safely are enabled; the rest are marked in the panel with a reason.
 
 ## Compatibility
 
-- **Supported platforms**: cross-platform (macOS / Windows / Linux) — wherever DSH runs the plugin runs; the host half is Node (about `^22.19` or `>=24`) and the client is React, with no OS-specific APIs.
-- Works in both DSH Desktop and DSH web (same host + client halves).
-- Peer dependencies are listed in `package.json`; `react` and `@deepseek-ai/*` are provided by the DSH runtime.
-- `0.1.2-rc.1`: the existing read, archive, recycle-bin, permanent-purge, and cross-workspace move paths remain available.
-- `0.1.3-alpha.1`: snapshot lists and chunked `SessionHandle` read flows are supported. Permanent purge and cross-workspace move are available through guarded path derivation + write-ownership probes (see the behavior notes below), and disable themselves whenever a safe path cannot be verified; other management capabilities are unaffected. The panel shows the effective capabilities.
-- `0.1.5-rc.1` / `0.1.5-rc.2` (both verified): the session log format is upgraded to **v3** and this plugin is adapted — it reads the **highest generation** (matching the runtime), tolerates v0/v2/v3 generations side by side, follows the new `SessionHandle.read()` shape (`{ eventState, events }`), moves sessions as **whole-directory moves** (reclaiming superseded-generation copies automatically), and queues moves for sessions DSH holds open (see "Moving an active session" above).
-- `0.1.7-rc.2` (verified): the session format is upgraded again to **v4** and the format catalog moves to its own package; this plugin is adapted — reads go through the official automatic migration, and cross-workspace moves re-sample the header against the backend's current format (sessions created on older formats can be moved again, and the relocated copy lands on the current format).
-- `0.2.0-rc.1` / `0.2.0-rc.2` (both verified):
-  - Still format **v4** (the version is probed from the backend's format catalog, never hardcoded).
-  - `ctx.sessions` is now a session **data-stream** service with no `open`: opening a session goes through the official `uiWorkspace.openSession` — the settings panel's "open session" action and subagent navigation are both adapted (issue #12).
-  - Install gate: 0.2.0 validates the `@deepseek-ai/dsh*` ranges in a plugin's `peerDependencies`; this plugin widened them to `>=0.1.0-rc.6`, which passes on both `0.1.7-rc.2` and `0.2.0-rc.2` (issue #13).
-  - `ctx.storageDomain` is the **domain data form** in 0.2.0: writes are schema-validated and durable before they resolve. This plugin only writes fields that exist in the official domain schema, verified end-to-end against a **real domain + real WorkspaceRegistry** (archive / restore / list / storage stats / cross-workspace move) with a read-back from the storage medium to prove the archive state really persisted.
-  - Active-session detection: since 0.1.7 the host exposes no "current session" accessor (all three historical probes come back empty), so the **client reports the open session id every 15 seconds** and the host trusts it only within a 45-second freshness window. It backs two guards: refusing to move the session you are looking at (409 / queued) and skipping it in auto-archive. A stopped heartbeat (panel closed, tab hidden, process gone) means "cannot prove it is active" — the move is allowed rather than locking the session forever.
-- `0.2.1-rc.2` (verified, issue #16):
-  - Still format **v4**; `@deepseek-ai/dsh-session-persistence-jsonl` no longer default-exports a class but a cordis plugin (`{ name, apply }`) — this plugin mounts either shape and the real-stack smoke boots both.
-  - The sidebar wraps session and workspace rows in an extra `span`: the workspace title row and the group container are located by preferring direct children and only looking further down without crossing nested subgroups — otherwise the whole calibration silently short-circuits.
-  - The collapsed-group member count is calibrated from `sessionCount`, which does not depend on expansion (upstream renamed `collapsedSessionRows` to `watermarkRows`; `group.sessions` is empty while collapsed and `sessionVisible()`-filtered while expanded). Missing either input keeps the upstream wording instead of guessing a number.
-  - Empty-group title collapse: the container is still a role-less `groupSection` (`role="group"` has only ever marked subgroups since 0.1.7), so the anchor moved to the workspace title row's parent.
-- Unverified future runtimes expose only capabilities the plugin can safely identify; method presence alone is not presented as behavioral compatibility.
+Works on DSH Desktop and `dsh web` with the same host + client, and on macOS / Windows / Linux, anywhere DSH runs. The host is built as Node ESM targeting `node22`, the browser half is React, and neither depends on OS-specific APIs.
 
-### Behavior differences and degradations on the SessionHandle era (`0.1.3+`)
+| Runtime | Status | What this version did |
+|---|---|---|
+| `0.2.2-rc.3` | verified | Left-nav icon uses the official `settings.section.icon` slot; menu resolution is synchronous with a pre-warmed snapshot (rc.3 gives async `resolve` a 1 s budget); duplicate registration guarded (rc.3 throws on the same id twice); design tokens moved to current names; blank detection covers the 0.2.2 state events; cold titles come from the official persisted projection cache (`sessionProjectionCache`, zero I/O), whose `blank` is used as a one-way pre-filter, and blank sidebar rows now match upstream by hiding everything except the current session |
+| `0.2.2-rc.1` | verified | Session menu moved to the official `contextMenus` data registration; delete also writes the native archive flag; `inject` keeps only packages that really exist |
+| `0.2.1-rc.2` | verified | Session format still v4; persistence became a cordis plugin (both shapes mount); sidebar wraps rows, folded counts calibrated from `sessionCount`; the empty-group container is the role-less `groupSection` |
+| `0.2.0-rc.1` / `rc.2` | verified | `ctx.sessions` became a data-stream service, opening a session goes through `uiWorkspace.openSession`; peer ranges widened to `>=0.1.0-rc.6`; the active session is reported by the client heartbeat |
+| `0.1.7-rc.2` | verified | Session format v4, format catalog split into its own package; moves re-sample the header against the backend format |
+| `0.1.5` / `0.1.3` / `0.1.2` | verified | Older runtimes only enable operations that can be verified safely |
 
-- **Recycle-bin restore is verified**: before restoring, the plugin confirms the underlying stored session still exists (live / `stat` / listing, in that order). It returns accurate errors when the session is gone (`DSM_SESSION_MISSING`), was permanently purged (`DSM_SESSION_PURGED`), or the index still lists it but the log file has vanished (`DSM_SESSION_LOG_MISSING`); when the log location cannot be verified the entry is honestly reported as `unverified` instead of silently passing. Restoring a session whose workspace was deleted succeeds and notes that it now lives under "未分组" (ungrouped).
-- **Permanent purge / empty recycle bin / automatic physical cleanup**: the official public contract offers no delete API, so the plugin keeps the legacy-era semi-official approach — a **three-layer guarded path derivation** starting from the backend instance's storage-root field (root → session directory structure → session-id ownership check), followed by a whole-directory removal verified with the official `stat`. Sessions with an active writer are refused (409). When the derivation fails (e.g. the storage root is unavailable), the actions degrade to disabled with an explicit reason instead of deleting blindly.
-- **Cross-workspace move**: the primary path replays events through the official `create` + `append` (writer-ownership probe refuses sessions whose write ownership is held by DSH, before/after `revision` checks guard against concurrent writes, backup + rollback guarantees no half-moved state on failure); when the backend holds a ghost record for the same id it falls back to relocating the log with a frame0 cwd rewrite (frame count and content verified byte-for-byte). Paths come from the same guarded derivation; the workspace grouping index is rebuilt automatically after the move — no restart needed. Since runtime `0.1.5` a session may keep **several log generations side by side** (the runtime publishes a newer generation but keeps the older ones: `session.jsonl.zstd` + `session.v2.jsonl.zstd` + `session.v3.jsonl.zstd`), while the runtime insists that one id lives in exactly one project directory — so a move is a **whole-directory move**: the source session directory is renamed out of sight first, the target is materialized and verified, then the source directory is deleted. Superseded older-generation copies left in other project directories by earlier versions are **reclaimed automatically**, so a session can never get stuck as a cross-directory duplicate.
-- **Purge tombstones never suppress new sessions**: if a session with the same id is recreated later, the tombstone yields automatically and the new session appears normally in lists and the sidebar.
-- **Metadata cache**: whether a session log changed is judged by the official snapshot's `revision` on newer runtimes (comparable only within one process, and never written to any cross-restart cache file), or by the file's `(mtime, size)` fingerprint on legacy runtimes. A list's folder and creation time come straight from the snapshot header without reading logs; titles are never decoded during page loads either — a session whose title is not cached yet simply renders blank, and the list refreshes itself once the background pass fills it in. **A failed read is kept apart from a session that genuinely has no title**: failures are never cached and are retried later (immediately once that session's log changes), so one transient failure can't leave a session stuck at "(untitled)".
-- **Auto-archive**: the new runtime exposes no reliable "last activity" timestamp; the sweep skips (`no-activity-data`) when idleness cannot be proven, and never archives on a guess.
-- **Sidebar injection**: DOM / React fiber recognition is centralized in a versioned adapter; when the upstream sidebar shape is no longer recognized, all injections degrade safely and the official sidebar is left untouched. While recognition works, updates are driven incrementally by a MutationObserver with only a low-frequency fallback check.
-- **Lineage disclosure**: subagent sessions are recognized via the official header fields (`origin: 'subagent'`, `parentSession`, `delegationDepth`); since the upstream sidebar renders neither subagent nor empty sessions, the plugin injects subagent rows under their parent and hides empty rows. Empty detection uses the **event-type method** — `0.1.3` always writes one lifecycle-metadata frame at creation (`permission/preset` / `sandbox/mode` / `approval/policy`), which breaks the old size threshold; candidates up to 8KB (compressed) are decoded once through the official API and marked empty only when no content event exists beyond the header, decode failures fall back to non-empty. Verdicts are cached per session under a cross-restart size fingerprint and persisted to disk (only genuinely decoded verdicts are; failures never are), the queue yields the event loop between batches, and sidebar responses stay decode-free end to end.
+Unverified future runtimes get only the safely recognisable subset. The panel's own messages and the `/archived-sessions/capabilities` payload are what count, not whether a method happens to exist.
+
+### What's reduced on old runtimes, and where the workarounds sit
+
+- **Restoring from the bin** first confirms the underlying session still exists (live / `stat` / list, three levels). Gone returns `DSM_SESSION_MISSING`, already purged returns `DSM_SESSION_PURGED`, index present but log vanished returns `DSM_SESSION_LOG_MISSING`; when the location can't be verified it says `unverified` rather than pretending. Restoring into a deleted workspace succeeds and notes that the session is temporarily ungrouped.
+- **Permanent delete / empty bin / automatic purge**: the official contract has no delete API, so this keeps the legacy half-official route: three guarded derivations from the backend instance's storage root (root → session-directory layout → session-id ownership check), then the directory is removed and re-checked with the official `stat`. Sessions with active writes are refused (409). If derivation fails (say the storage root can't be established) the capability is disabled with a reason rather than deleting blind. Sibling generations in the same directory go too, otherwise DSH falls back to an older one and the delete accomplishes nothing.
+- **Cross-workspace moves** primarily replay official `create` + `append` events: a write-ownership probe refuses sessions DSH holds for writing, revision checks bracket the write, and a backup rollback guarantees no half-moved state. When the backend carries a same-id ghost record, it falls back to rewriting the frame-0 cwd, verifying frame count and content byte for byte. Paths come from the same guarded derivation, and the workspace group index is rebuilt after the move, so no restart is needed. Because the runtime enforces "one project directory per session id", a move relocates the whole directory: the source is moved aside first (invisible to official scanning), the target is replayed and verified, and only then is the source removed. Superseded generations left in other project directories are reclaimed along the way, so a session never gets stuck as a cross-directory duplicate that can be neither moved nor deleted.
+- **Purge tombstones don't suppress new sessions.** If a session with the same id is created again, the tombstone steps aside and the new one shows up normally.
+- **Metadata caching**: change detection uses the official snapshot `revision` on newer runtimes (comparable within one process only, never written to a cross-restart cache file) and a `(mtime, size)` fingerprint on older ones. List cwd and creation time come straight from the snapshot header without reading the log; titles aren't read at page load either: a missing title renders blank and arrives from a background queue. A read failure and "this session truly has no title" are kept strictly apart: a failure writes no cache and is retried later (immediately once that log changes), so one transient failure never leaves a session stuck at "(untitled)".
+- **Auto-archive** finds no reliable "last active" signal on newer runtimes, so when idleness can't be proven the check is skipped (`no-activity-data`) instead of guessing.
+- **Sidebar injection** keeps DOM / React-fiber recognition inside a versionable adapter. When the upstream sidebar shape isn't recognised the whole augmentation disables safely and the official sidebar is untouched. When it is recognised, it runs mostly on incremental MutationObserver updates with a low-frequency fallback sweep.
+
+## Development
+
+Source lives on `master`, where `lib/` is ignored. Run `npm ci`, `npm run build`, `npm run check`, and `npm test` in this plugin directory. Push a v* tag to build the precompiled `release` branch. The user installs or updates through the UI.
+
+### Source layout
+
+```
+package.json        npm metadata + dsh.bundle.patch + dsh.client (browser-half registration)
+cordis.patch.yml    inserts this plugin's row into the profile bundle
+build.mjs           esbuild build script (emits lib/, reproducible build stamp)
+lib/index.js        prebuilt host (ESM)
+lib/client.js       prebuilt client (ModuleLoader CJS handshake)
+
+src/index.js               host entry: /archived-sessions/* routes, archive / recycle-bin / move orchestration
+src/compat/capabilities.js capability probe (decides which operations a persistence generation allows)
+src/compat/persistence.js  persistence adapter: stat the official locate() result first, derive from disk otherwise
+src/handle-era-ops.js      SessionHandle-era operations (archive / move / permanent delete)
+src/handle-era-paths.js    guarded path derivation (root → directory layout → session-id ownership → highest generation)
+src/path-guard.js          log-path ownership checks (pure)
+src/active-session.js      active-session reporting (per-clientId buckets + 45s TTL)
+src/pending-moves.js       queued-move store (survives restarts, retry schedule)
+src/move-notices.js        retention and acknowledgement of queued-move outcome notices
+src/auto-archive.js        auto-archive settings (schema v4) + the pure candidate rule
+src/storage-stats.js       storage usage aggregation (pure)
+src/lineage.js             lineage classification and empty-session detection (event-type method)
+src/projection-hints.js    cold reader for the official projection cache (title / blank hints, zero I/O)
+src/empty-scan-index.js    on-disk cache of empty-session verdicts (fingerprint + TTL gates)
+src/star-index.js          starred-session index (schema v3)
+src/tag-index.js           tag index (schema v4)
+src/saved-filters.js       saved filter presets (schema v1)
+src/title-persist-index.js small on-disk index of titles / metadata
+src/session-meta-cache.js  in-memory session metadata cache (validated by log-content fingerprint)
+src/markdown.js            session → human-readable Markdown
+src/zstd-frame.js          zstd multi-frame scanning and rewriting
+src/state-temp-sweep.js    sweeps stale temp files left by atomic writes
+
+src/client/index.jsx       client entry: settings panel, sidebar augmentation, official slot / contextMenus registration
+src/client/logic.js        unit-tested pure logic (folding, counting, filtering, drag step, …)
+```
+
+### Host routes
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/archived-sessions/sessions` | List every session (with archived flags) for the Session Manager panel |
+| POST | `/archived-sessions/list` | List archived sessions (skipping deleted / missing ones) |
+| POST | `/archived-sessions/archive` | Archive (hide) a single session |
+| POST | `/archived-sessions/archive-many` | Batch archive |
+| POST | `/archived-sessions/restore` | Unarchive one session |
+| POST | `/archived-sessions/restore-many` | Batch unarchive |
+| POST | `/archived-sessions/delete` | Delete one session **into the recycle bin** (not an immediate physical delete) and into DSH's native archive; cascades the whole subagent subtree by default (`cascadeSubagents: false` keeps them), returning `cascaded` / `cascadedIds` |
+| POST | `/archived-sessions/delete-many` | Batch move to the recycle bin (cascades subagents, returns the total `cascaded`) |
+| POST | `/archived-sessions/trash/list` | List sessions in the recycle bin |
+| POST | `/archived-sessions/trash/restore` | Restore from the recycle bin (also restores the subagents that were carried along, returns `cascaded`) |
+| POST | `/archived-sessions/trash/purge` | Permanently delete one recycle-bin session (cascades the same way, returns `cascaded`) |
+| POST | `/archived-sessions/trash/purge-many` | Empty / batch-purge recycle-bin sessions (cascades by parent) |
+| POST | `/archived-sessions/trash/settings` | Read or update the retention policy `{ retentionDays }` (0 / 7 / 30 / 90) |
+| POST | `/archived-sessions/trash/verify` | Verify that recycle-bin logs still exist |
+| POST | `/archived-sessions/workspaces` | List candidate target workspaces |
+| POST | `/archived-sessions/move` | Move a session to a target workspace `{ sessionId, targetPath }`; returns `{ queued: true }` and enqueues when DSH holds the session open |
+| POST | `/archived-sessions/move-many` | Batch cross-workspace move `{ sessionIds, targetPath }`. One failure never blocks the rest, failures are reported per session, held-open sessions land in `queued`, and indexes are rebuilt once at the end |
+| POST | `/archived-sessions/pending-moves` | Inspect the pending-move queue (held-open sessions are queued and complete on release) |
+| POST | `/archived-sessions/pending-moves/cancel` | Cancel queued moves `{ sessionIds }` |
+| POST | `/archived-sessions/pending-moves/notices/ack` | Acknowledge queued-move outcome notices (cleared after display; unacknowledged items are kept up to 7 days) |
+| POST | `/archived-sessions/details` | Session details (disk / stats / tools / fetch / files / lineage) `{ sessionId }` |
+| POST | `/archived-sessions/sidebar-state` | Authoritative titles, recycle-bin ids, purge tombstones, **lineage classification** (subagent / branch / empty flags), `warmPending` / `refinePending` (whether the title-warmup and empty-detection queues are still in flight), and `moveNotices` (queued-move outcomes; omitted when empty) |
+| POST | `/archived-sessions/lineage-tree` | Recursive subagent tree (data source for panel grouping and sidebar folding), already filtered against the recycle bin and tombstones |
+| POST | `/archived-sessions/star/set` | Star / unstar `{ sessionId or sessionIds, starred }` |
+| POST | `/archived-sessions/tags/list` | Tag definitions + session→tag assignments `{ tags, assignments }` |
+| POST | `/archived-sessions/tags/create` | Create a tag `{ name }` (rejects duplicates / over 200, error carries a code) |
+| POST | `/archived-sessions/tags/rename` | Rename `{ id, name }` (id is stable) |
+| POST | `/archived-sessions/tags/merge` | Merge into another tag `{ fromId, toId }` (deduplicated; the source tag disappears) |
+| POST | `/archived-sessions/tags/delete` | Delete a tag `{ id }` (definition and assignments only, never the sessions) |
+| POST | `/archived-sessions/tags/set` | Replace a session's tags `{ sessionId, tagIds }` |
+| POST | `/archived-sessions/filters/list` / `save` / `delete` | Saved filter presets `{ name, filters }` (≤20; `filters` is an opaque payload) |
+| GET | `/archived-sessions/export-md?sessionId=` | Single-session Markdown export (human-readable transcript) |
+| POST | `/archived-sessions/storage` | Storage aggregation (per-workspace ranking + largest sessions) `{ topN }` |
+| POST | `/archived-sessions/auto-archive/settings` | Read or update the auto-archive policy `{ inactiveDays, skipStarred }`; reading lazily triggers the daily check |
+| POST | `/archived-sessions/auto-archive/run` | Run the auto-archive check once, ignoring the daily throttle |
+| POST | `/archived-sessions/capabilities` | Current persistence generation, read / archive / recycle-bin / purge / cross-workspace-move capabilities, plus two client echoes: `clientMenu: { mode, at }` (menu channel, `contextMenus` or `dom`) and `clientUi: { navSection, navIcons, navOwn, navFallback, navIconRenders, sessionRows, workspaceRows, overflowRows, stateDots, tokenBgLayer2, tokenWarn, at }` (UI self-evidence: counts and resolved token values only, never titles or message bodies) |
 
 ## License
 
