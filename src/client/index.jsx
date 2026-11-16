@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createDomHub } from './dom-hub.js'
 import { installSessionSync, shouldHideEmptySession } from './session-sync.js'
-import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dotStateFor, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes } from './logic.js'
+import { aliveSessionCount, applyTagFilter, canDropOnWorkspace, collapsedVisibleTotal, countRenderedVisible, dragAutoScrollStep, effectiveTitleOf, filterShapeFromSaved, filterSnapshotOf, foldBranches, foldOrphanSubagents, foldSubagents, matchWorkspaceFilter, noticeToastPlan, openSubagentToast, overflowPlan, pathTail, remainingRows, sessionForNodes, shortId, shouldHideEmptyGroup, starredOf, tagDeleteConfirm, titleBackfillDecision, toastDurationFor, workspaceForNodes, WS_GONE, WS_UNGROUPED } from './logic.js'
 
 export const inject = ['slots']
 
@@ -23,13 +23,11 @@ function loadPanelPrefs() {
 }
 
 const CSS = `
-/* 兼容 shim（2026-09-30 对 0.2.0-rc.2 实测）：当前 runtime 的设计令牌不再提供
-   fill-elevated / fill-subtle / fill-secondary / label-inverted / state-warning-primary
-   这几个 alias，缺位会让输入框、下拉框、卡片、徽标整体回退成透明。这里把它们重映射
-   到 runtime 现有 token（官方 Input/Pill 分别用 bg-layer-1 / bg-layer-2）。选择器用
-   :where(:root)（零特异性）：runtime 将来恢复官方定义时自动胜出，shim 只在缺位时兜底。
-   state-warning-primary 是旧名，现名为 state-warn-primary。 */
-:where(:root){--dsw-alias-fill-elevated:var(--dsw-alias-bg-layer-2);--dsw-alias-fill-subtle:var(--dsw-alias-bg-layer-1);--dsw-alias-fill-secondary:var(--dsw-alias-bg-layer-2);--dsw-alias-label-inverted:var(--dsw-alias-label-primary-foreground);--dsw-alias-state-warning-primary:var(--dsw-alias-state-warn-primary)}
+/* 设计令牌直连 runtime：0.2.0 起 fill-elevated / fill-subtle / fill-secondary /
+   label-inverted / state-warning-primary 这五个 alias 已不存在（0.2.2-rc.3 令牌表
+   复核仍然没有），一律改用 bg-layer-1 / bg-layer-2 / label-primary-foreground /
+   state-warn-primary。3.7.12 及更早版本靠一段 :where(:root) 重映射兜底，3.7.13
+   直接在引用处写新名——少一层间接，也不再把旧名重新注入全局命名空间。 */
 /* 原生 <select> 的弹出列表由 Chromium 按 color-scheme 绘制，不声明时暗色主题下
    仍是白底，叠加未适配的文字色导致不可读；跟随 DSH 的暗色主题标记切换。 */
 .archv{color-scheme:light}
@@ -41,9 +39,9 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv{--dsm-radius-tag:9px;--dsm-radius-ctl:9px;--dsm-radius-sheet:10px;--dsm-radius-card:12px;display:flex;flex-direction:column;gap:4px;max-width:800px;padding:8px 2px 28px}
 .archv-head{display:flex;align-items:center;gap:10px;margin:0 0 2px}
 .archv-title{font-size:16px;font-weight:650;color:var(--dsw-alias-label-primary);letter-spacing:-0.01em;margin:0}
-.archv-stamp{font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:2px 8px;white-space:nowrap;cursor:pointer;transition:color .15s ease,border-color .15s ease}
+.archv-stamp{font-size:11px;font-weight:500;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:2px 8px;white-space:nowrap;cursor:pointer;transition:color .15s ease,border-color .15s ease}
 .archv-stamp:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
-.archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
+.archv-count{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:1px 8px;flex:none}
 .archv-sub{font-size:12px;line-height:1.55;color:var(--dsw-alias-label-tertiary);margin:0 0 12px;max-width:64ch}
 .archv-err{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:var(--dsm-radius-sheet);color:var(--dsw-alias-state-error-primary);font-size:12px;margin-bottom:10px}
 .archv-errretry{appearance:none;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent);background:transparent;color:inherit;border-radius:8px;padding:4px 10px;font-size:11px;cursor:pointer;flex:none}
@@ -62,7 +60,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .sess-farrow:hover{color:var(--dsw-alias-label-primary)}
 .sess-farrow svg{display:block;transition:transform .22s ease}
 .sess-fwrap.sess-fmore-open .sess-farrow svg,.sess-fwrap.sess-fsec-on .sess-farrow svg{transform:rotate(180deg)}
-.sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
+.sess-fbtn{appearance:none;min-height:30px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:999px;font-size:12px;font-weight:500;cursor:pointer}
 .sess-fbtn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .sess-fbtn-on{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 .sess-tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:0 0 8px}
@@ -86,7 +84,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dsm-kid-acts .archv-btn{min-height:26px;padding:0 9px;font-size:11px}
 .sess-field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .sess-field label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
-.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.sess-field input,.sess-field select{box-sizing:border-box;width:100%;min-height:36px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
 .sess-results{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:0 0 4px}
 /* T4 后计数行右侧挂了「保存筛选」控件组，正文独占左侧可收缩。 */
 .sess-results-main{flex:1 1 auto;min-width:0}
@@ -96,7 +94,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .sess-batch-pin{position:sticky;top:0;z-index:30;margin:0 -2px 4px;padding:8px 4px 6px;background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l2);box-shadow:0 6px 14px rgb(0 0 0/.08)}
 .sess-btntext{font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}
 .archv-list{display:flex;flex-direction:column;gap:8px}
-.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-elevated);transition:border-color .15s ease,background-color .15s ease}
+.archv-card{display:flex;flex-direction:column;align-items:stretch;gap:0;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-card);background:var(--dsw-alias-bg-layer-2);transition:border-color .15s ease,background-color .15s ease}
 .archv-card:hover{border-color:var(--dsw-alias-border-l4)}
 .archv-card-exp{border-color:var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-1)}
 .archv-row{display:flex;align-items:center;gap:14px;width:100%;min-width:0}
@@ -104,16 +102,16 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-titlerow{display:flex;align-items:center;gap:8px;min-width:0}
 .archv-name{font-size:13px;font-weight:550;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
 .archv-meta{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;min-width:0;overflow:hidden}
-.archv-wtag{display:inline-flex;align-items:center;gap:4px;min-width:0;flex:0 1 auto;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-subtle);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.archv-wtag{display:inline-flex;align-items:center;gap:4px;min-width:0;flex:0 1 auto;font-size:11px;font-weight:500;line-height:1;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:3px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .archv-wgone{border-style:dashed;color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 7%,transparent)}
 .archv-active{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 8%,transparent)}
 .archv-date{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none}
 .dsm-branch-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:var(--dsw-alias-state-success-primary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
-.dsm-empty-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
+.dsm-empty-chip{display:inline-flex;align-items:center;flex:none;min-height:22px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap}
 /* 3.7.0 T4 标签 chip 系：卡片标题行内、分支/空白 chip 之后。警示色系区别于
    分支（绿）/空白（灰），名字超长省略号；+N 计数 chip 中性色。 */
 .dsm-tagchip{display:inline-flex;align-items:center;flex:none;max-width:9em;min-height:22px;padding:0 8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 45%,transparent);border-radius:var(--dsm-radius-tag);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#EAB308) 10%,transparent);color:var(--dsw-alias-label-secondary);font-size:11px;font-weight:500;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle)}
+.dsm-tagchip-more{max-width:none;color:var(--dsw-alias-label-tertiary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 .archv-id{appearance:none;border:none;background:none;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-tertiary);flex:none;margin-left:auto;white-space:nowrap;cursor:pointer;transition:color .12s ease}
 .archv-id:hover{color:var(--dsw-alias-label-secondary)}
 .archv-id-copied{color:var(--dsw-alias-state-business-primary)}
@@ -127,7 +125,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-star-on svg{fill:currentColor}
 .archv-body{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
 .archv-actions{display:flex;gap:8px;flex:none;flex-wrap:nowrap;justify-content:flex-end}
-.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:var(--dsm-radius-ctl);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
+.archv-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:var(--dsm-radius-ctl);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
 .archv-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .archv-btn:disabled{opacity:.5;cursor:default}
 .archv-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
@@ -136,9 +134,9 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-go:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);color:var(--dsw-alias-state-business-primary)}
 .archv-empty{display:flex;align-items:center;gap:10px;padding:20px 14px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsm-radius-card);color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
 .archv-skel{display:flex;flex-direction:column;gap:8px}
-.archv-skel-card{height:58px;border-radius:var(--dsm-radius-card);background:var(--dsw-alias-fill-subtle);position:relative;overflow:hidden}
-.archv-skel-card::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--dsw-alias-fill-elevated) 75%,transparent),transparent);animation:archv-shimmer 1.4s infinite}
-.archv-status{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:linear-gradient(var(--dsw-alias-fill-elevated),var(--dsw-alias-fill-elevated)),var(--dsw-alias-bg-layer-1,Canvas);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;line-height:1.5;text-align:center;box-shadow:0 8px 24px rgb(0 0 0/.25);display:flex;align-items:center;gap:8px;animation:archv-pop .18s ease-out;max-width:min(92vw,480px);cursor:pointer}
+.archv-skel-card{height:58px;border-radius:var(--dsm-radius-card);background:var(--dsw-alias-bg-layer-1);position:relative;overflow:hidden}
+.archv-skel-card::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--dsw-alias-bg-layer-2) 75%,transparent),transparent);animation:archv-shimmer 1.4s infinite}
+.archv-status{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:2147483601;background:linear-gradient(var(--dsw-alias-bg-layer-2),var(--dsw-alias-bg-layer-2)),var(--dsw-alias-bg-layer-1,Canvas);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);padding:9px 16px;border-radius:999px;font-size:12px;line-height:1.5;text-align:center;box-shadow:0 8px 24px rgb(0 0 0/.25);display:flex;align-items:center;gap:8px;animation:archv-pop .18s ease-out;max-width:min(92vw,480px);cursor:pointer}
 .archv-status-long{border-radius:14px;text-align:left}
 .archv-spin{width:12px;height:12px;border:2px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 35%,transparent);border-top-color:var(--dsw-alias-label-secondary);border-radius:50%;animation:archv-rot .8s linear infinite;flex:none}
 @keyframes archv-shimmer{100%{transform:translateX(100%)}}
@@ -148,28 +146,28 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .archv-status-err{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);font-weight:500}
 @media (prefers-reduced-motion:reduce){.archv-skel-card::after{animation:none}.archv-card,.archv-btn,.archv-star{transition:none}.archv-star:hover,.archv-star:active{transform:none}.archv-status,.archv-spin{animation:none}}
 @media (max-width:640px){.archv-card{flex-direction:column;align-items:stretch;gap:10px}.archv-actions{justify-content:flex-end}.sess-tools,.sess-tools-4,.sess-tools-5{grid-template-columns:1fr}.sess-fbtn,.archv-btn{min-height:40px}.archv-star{width:30px;height:30px}.archv-star svg{width:22px;height:22px}.dsm-kids{margin-left:10px}.archv-titlerow{flex-wrap:wrap}.dsm-kid-row{flex-wrap:wrap}.dsm-kid-acts{margin-left:0}}
-.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
+.mv-sheet{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:12px;margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-bg-layer-1)}
 .mv-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .mv-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .mv-sheet-close{appearance:none;width:26px;height:26px;color:var(--dsw-alias-label-secondary);background:0 0;border:none;border-radius:7px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
 .mv-sheet-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);width:100%}
+.mv-seg{display:flex;gap:2px;padding:2px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);width:100%}
 .mv-segbtn{appearance:none;flex:1;min-height:30px;padding:0 12px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
 .mv-segbtn:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .mv-segbtn-on{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 1px 2px rgb(0 0 0/.08)}
 .mv-field{display:flex;flex-direction:column;gap:6px}
 .mv-field label.mv-field-label{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary)}
-.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.mv-field select,.mv-field input[type=text]{box-sizing:border-box;appearance:none;width:100%;min-height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
 .mv-field select:focus-visible,.mv-field input[type=text]:focus-visible,.mv-sheet-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .mv-browse-row{display:flex;align-items:center;gap:8px}
 .mv-browse-row input[type=text]{flex:1;min-width:0}
 .mv-foot{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:2px}
 @media (max-width:640px){.archv-row{flex-wrap:wrap}.mv-sheet{padding:12px}}
-.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-fill-subtle)}
+.dtl-sheet{margin-top:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-sheet);background:var(--dsw-alias-bg-layer-1)}
 .dtl-sheet-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .dtl-sheet-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .dtl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:10px}
-.dtl-cell{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-fill-elevated);min-width:0}
+.dtl-cell{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);min-width:0}
 .dtl-k{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dtl-v{font-size:12px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-sec{margin-top:12px}
@@ -178,7 +176,7 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dtl-note{margin-top:8px;font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5}
 .dtl-sec-t{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px}
 .dtl-tags{display:flex;flex-wrap:wrap;gap:6px}
-.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-elevated);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
+.dtl-tag{display:inline-flex;font-size:11px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-tag);padding:2px 8px}
 .dtl-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
 .dtl-list code,.dtl-paths code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-primary);word-break:break-all}
 .dtl-filetool{color:var(--dsw-alias-label-tertiary)}
@@ -209,15 +207,15 @@ body[data-ds-dark-theme] .archv{color-scheme:dark}
 .dsm-tagrow{display:flex;align-items:center;gap:8px;min-width:0;padding:6px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dsm-tagrow:last-child{border-bottom:none}
 .dsm-tag-name{flex:0 1 auto;min-width:0;font-size:12.5px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsm-tag-input{box-sizing:border-box;flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
+.dsm-tag-input{box-sizing:border-box;flex:1 1 auto;min-width:0;min-height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}
 .dsm-tag-input:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .dsm-tag-acts{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto}
 .dsm-tag-acts .archv-btn{min-height:26px;padding:0 9px;font-size:11px}
-.dsm-tag-acts select{appearance:none;min-height:26px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:10em}
+.dsm-tag-acts select{appearance:none;min-height:26px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:10em}
 .dsm-fbar{display:flex;align-items:center;gap:6px;flex:none;margin-left:auto;flex-wrap:wrap}
 .dsm-fbar .archv-btn{min-height:24px;padding:0 8px;font-size:11px}
-.dsm-fbar select{appearance:none;min-height:24px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:12em}
-.dsm-fbar input{box-sizing:border-box;min-width:9em;min-height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);font-size:11px;font-family:inherit}
+.dsm-fbar select{appearance:none;min-height:24px;padding:0 6px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;font-family:inherit;max-width:12em}
+.dsm-fbar input{box-sizing:border-box;min-width:9em;min-height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsm-radius-ctl);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:11px;font-family:inherit}
 @media (max-width:640px){.dsm-fbar{margin-left:0;width:100%;justify-content:flex-end}.dsm-tag-acts{margin-left:auto;flex-wrap:wrap;justify-content:flex-end}}
 `
 
@@ -430,20 +428,53 @@ async function postActiveAware(path, body) {
   return postJSON(path, body)
 }
 
-// Left-nav icon swap: DSH's settings shell renders a shared fallback gear for
-// every custom section and settings.section has no per-section icon field.
-// Like dsh-better-sidebar, we mark our own row by matching its visible label
-// text, then CSS swaps the gear for an archive-box glyph. The marker owns no
-// shell structure and is removed on fiber disposal (HMR-safe, ships with the
-// plugin).
+// 设置左导航图标。
+//
+// 0.2.2 起外壳声明了 `settings.section.icon` 槽，我们把自己的归档盒图标注册在
+// 那里（见下方 `ArchiveBoxIcon` 与 apply 里的注册），外壳就**根本没有** fallback
+// 齿轮可渲染——一个图标，不是两个。
+//
+// 下面这段 CSS 只服务 0.2.2 之前的外壳：那时没有逐 section 的图标字段，只能把
+// 我们的行按可见文案标记出来，再用遮罩盖掉原生齿轮。这里有两个必须注意的点：
+//   1. 原生图标**不是** button 的直接子节点，0.2.2 把它包进了
+//      `<span class="navIcon">`，所以老写法 `> svg:first-child` 一个都匹配不到，
+//      齿轮留了下来、与我们的遮罩并排显示（就是「设置里有两个 logo」）。
+//      改为匹配任意后代 `svg`，并排除掉我们自己那颗（带 `data-dsm-nav-icon`）。
+//   2. 遮罩用 `:not(:has(...))` 兜住：只有确认没有挂上我们的图标时才画，
+//      两套方案永远不会同时出现。
 const NAV_CSS = `
-[data-dsh-nav-sessions] > svg:first-child { display: none; }
-[data-dsh-nav-sessions]::before {
+[data-dsh-nav-sessions] svg:not([data-dsm-nav-icon]) { display: none; }
+[data-dsh-nav-sessions]:not(:has([data-dsm-nav-icon]))::before {
   content: ''; flex: none; width: 16px; height: 16px; background: currentColor;
   -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http://www.w3.org/2000/svg'%20width%3D'24'%20height%3D'24'%20viewBox%3D'0%200%2024%2024'%20fill%3D'none'%20stroke%3D'black'%20stroke-width%3D'2'%20stroke-linecap%3D'round'%20stroke-linejoin%3D'round'%3E%3Cpath%20d%3D'M21%208v13H3V8'/%3E%3Cpath%20d%3D'M1%203h22v5H1z'/%3E%3Cpath%20d%3D'M10%2012h4'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D'http://www.w3.org/2000/svg'%20width%3D'24'%20height%3D'24'%20viewBox%3D'0%200%2024%2024'%20fill%3D'none'%20stroke%3D'black'%20stroke-width%3D'2'%20stroke-linecap%3D'round'%20stroke-linejoin%3D'round'%3E%3Cpath%20d%3D'M21%208v13H3V8'/%3E%3Cpath%20d%3D'M1%203h22v5H1z'/%3E%3Cpath%20d%3D'M10%2012h4'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 `
+
+// 设置左导航里属于本插件的图标（归档盒）。与上面遮罩用的是同一套路径数据，
+// 所以旧版（遮罩）与新壳（真 SVG）看到的是同一个形状。
+//
+// 槽签名为 `{ size, active }`，`size` 以像素为单位；这里刻意不因 `active` 改变
+// 形状或粗细——外壳自己负责选中态的背景，图标保持同一套视觉。
+// 渲染计数：只有真正被外壳调用过，才说明「按 id 配对成功、fallback 齿轮没上场」。
+// host 侧通过 /capabilities 的 clientUi.navIconRenders 读它——设置面板打开过一次
+// 之后，这个数字恒 >= 1 且 `navFallback` 为 0，就是「一颗图标」的现场证据。
+let dsmNavIconRenders = 0
+
+function ArchiveBoxIcon({ size = 16 }) {
+  dsmNavIconRenders++
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      data-dsm-nav-icon="" aria-hidden="true" focusable="false"
+    >
+      <path d="M21 8v13H3V8" />
+      <path d="M1 3h22v5H1z" />
+      <path d="M10 12h4" />
+    </svg>
+  )
+}
 
 function markSettingsNav(hub) {
   const LABEL = '会话管理'
@@ -1167,7 +1198,9 @@ function SessionPanel({ workspacesSvc }) {
     const tagPassed = applyTagFilter(base, tagsReady ? tagFilter : '')
     const needle = query.trim().toLocaleLowerCase()
     const filtered = tagPassed.filter((item) => {
-      if (workspaceFilter !== 'all' && (item.workspacePath || '') !== workspaceFilter) return false
+      // issue #29：工作区口径收在 logic.matchWorkspaceFilter 里（全部 / 未分组 /
+      // 工作区已删 / 具体路径）。原先是路径精确相等，空路径的会话只能靠「全部」看。
+      if (!matchWorkspaceFilter(item, workspaceFilter)) return false
       if (!needle) return true
       // v3.6.2 #6：占位标题的会话按「有效标题」（列表值 → 侧栏权威回落）匹配，
       // 预热补齐但面板未刷新时也能按关键词搜到。
@@ -2024,9 +2057,14 @@ function SessionPanel({ workspacesSvc }) {
                   <label htmlFor="dsm-workspace-filter">工作区</label>
                   <select id="dsm-workspace-filter" value={workspaceFilter} onChange={(e) => setWorkspaceFilter(e.target.value)}>
                     <option value="all">全部工作区</option>
+                    {/* issue #29：两项「非路径」口径。顺序按面板 chip 的语义排：
+                        完全没有路径 = 未分组；有路径但已不在注册表 = 工作区已删。 */}
+                    <option value={WS_UNGROUPED}>未分组</option>
+                    <option value={WS_GONE}>工作区已删</option>
                     {workspaces.map((w) => <option key={w.workspaceId} value={w.path}>{w.title}</option>)}
-                    {/* 已存筛选可能指向已删除的工作区：补一个兜底 option，select 永不显示空白。 */}
-                    {workspaceFilter !== 'all' && !workspaces.some((w) => w.path === workspaceFilter) && (
+                    {/* 已存筛选可能指向已删除的工作区：补一个兜底 option，select 永不显示空白。
+                        两个哨兵不是路径，不能走这条兜底（否则会渲染成「已删工作区 · ?」）。 */}
+                    {workspaceFilter !== 'all' && workspaceFilter !== WS_UNGROUPED && workspaceFilter !== WS_GONE && !workspaces.some((w) => w.path === workspaceFilter) && (
                       <option value={workspaceFilter}>已删工作区 · {pathName(workspaceFilter) || '?'}</option>
                     )}
                   </select>
@@ -2610,14 +2648,14 @@ const SIDEBAR_AUG_CSS = `
 .dsm-body{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto}
 .dsm-loading,.dsm-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:4px 2px}
 .dsm-err{font-size:12px;color:var(--dsw-alias-state-error-primary);padding:4px 2px}
-.dsm-opt{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-primary);border-radius:9px;font-size:12.5px;cursor:pointer;text-align:left}
+.dsm-opt{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 11px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:9px;font-size:12.5px;cursor:pointer;text-align:left}
 .dsm-opt:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l4)}
 .dsm-opt:disabled{opacity:.55;cursor:default}
 .dsm-opt-cur{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 45%,transparent);color:var(--dsw-alias-state-business-primary)}
 .dsm-opt-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 .dsm-opt-sub{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;flex:none;margin-left:8px}
 .dsm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
-.dsm-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer}
+.dsm-btn{appearance:none;min-height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:9px;font-size:12px;font-weight:500;cursor:pointer}
 .dsm-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dsm-del{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,transparent)}
 .dsm-del:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent);color:var(--dsw-alias-state-error-primary)}
@@ -2633,28 +2671,26 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-sub-cur{font-size:11px;color:var(--dsw-alias-state-business-primary);flex:none;margin-left:8px}
 .dsm-dot{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;box-sizing:border-box;cursor:pointer;pointer-events:auto;z-index:1}
-.dsm-dot-unread-manual{background:var(--dsw-alias-state-business-primary)}
-.dsm-dot-waiting{background:var(--dsw-alias-state-warn-primary,#F59E0B)}
-.dsm-dot-unread{background:var(--dsw-alias-state-success-primary)}
+.dsm-dot-manual{background:var(--dsw-alias-state-business-primary)}
 .dsm-drag-source{opacity:.48}
 .dsm-drop-target{position:relative;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)!important;outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
-.dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-inverted);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
+.dsm-drop-target::after{content:'移动到这里';position:absolute;right:8px;top:50%;transform:translateY(-50%);padding:1px 6px;border-radius:4px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-foreground);font-size:10px;font-weight:600;line-height:16px;pointer-events:none}
 .dsm-drag-busy{cursor:progress!important}
 .dsm-trash{margin-top:18px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}
 .dsm-trash-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
 .dsm-trash-h h3{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .dsm-trash-count{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .dsm-trash-list{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto}
-.dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-trash-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2)}
 .dsm-trash-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
 .dsm-trash-date{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap}
 .dsm-trash-actions{display:flex;gap:6px;flex:none}.dsm-trash-actions .archv-btn{min-width:72px}
 .dsm-trash-empty{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:6px 2px}
 .dsm-storage-sum{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:10px}
 .dsm-storage-list{display:flex;flex-direction:column;gap:6px}
-.dsm-storage-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-fill-elevated)}
+.dsm-storage-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-2)}
 .dsm-storage-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--dsw-alias-label-primary)}
-.dsm-storage-bar{flex:0 0 96px;height:6px;border-radius:999px;background:var(--dsw-alias-fill-subtle);overflow:hidden}
+.dsm-storage-bar{flex:0 0 96px;height:6px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);overflow:hidden}
 .dsm-storage-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-state-business-primary)}
 .dsm-storage-size{font-size:12px;color:var(--dsw-alias-label-secondary);flex:none;white-space:nowrap}
 .dsm-storage-count{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;white-space:nowrap;max-width:32%;overflow:hidden;text-overflow:ellipsis}
@@ -2683,17 +2719,17 @@ const SIDEBAR_AUG_CSS = `
 .dsm-sub-row:hover .dsm-sub-name{color:var(--dsw-alias-label-primary)}
 .dsm-sub-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-sub-meta{flex:none;font-size:10.5px;opacity:.8}
-.dsm-sub-live .dsm-sub-meta{color:var(--dsw-alias-state-warning-primary);opacity:1;font-weight:600}
+.dsm-sub-live .dsm-sub-meta{color:var(--dsw-alias-state-warn-primary);opacity:1;font-weight:600}
 .dsm-sub-acts{display:none;align-items:center;gap:4px;flex:none}
 .dsm-sub-row:hover .dsm-sub-acts,.dsm-sub-row:focus-within .dsm-sub-acts{display:inline-flex}
-.dsm-sub-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-elevated);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:1px 6px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer}
+.dsm-sub-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:1px 6px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer}
 .dsm-sub-btn:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
 .dsm-sub-btn-danger{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 40%,transparent)}
 .dsm-sub-note{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:2px 0}
 .dsm-kids-badge:hover{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,transparent)}
 .dsm-row-sub{transform:translateX(calc(10px + var(--dsm-indent,0px)));transition:transform .15s ease}
 .dsm-row-sub::before{content:'';position:absolute;left:calc(-6px - var(--dsm-indent,0px));top:0;bottom:0;width:2px;border-radius:1px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 30%,transparent);pointer-events:none}
-.dsm-tag{display:inline-flex;align-items:center;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-fill-subtle);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:500;line-height:15px;flex:none;pointer-events:auto;border:none;cursor:default}
+.dsm-tag{display:inline-flex;align-items:center;margin-left:auto;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:500;line-height:15px;flex:none;pointer-events:auto;border:none;cursor:default}
 .dsm-tag-fork{cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);color:var(--dsw-alias-state-success-primary);font-weight:600}
 .dsm-tag-fork:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 20%,transparent)}
 .dsm-row-flash{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px;transition:outline-color .6s ease}
@@ -2788,9 +2824,49 @@ function dsmOnNotice(fn) { dsmNoticeHooks.add(fn); return () => dsmNoticeHooks.d
 // 其他空白会话隐藏，保留当前草稿及原生已确认有内容/运行中的会话。
 // 只隐藏，永不删除；子代理行按 DSH 设计不进侧栏（ui-subagent README 明文
 // "omitted from the ordinary sidebar"），收纳由上游完成，插件侧不做。
+// 会话 ⋯ 菜单实际启用的通道：'contextMenus'（0.2.2+ 官方数据注册）/
+// 'dom'（旧版 DOM 注入）/ null（尚未判定）。随能力探测一并上报给 host，
+// 用户报「菜单三项不见了」时不必打开 devtools 就能定位走的是哪条路。
+let dsmMenuMode = null
+// 界面自证：只统计计数与令牌解析值，不采集任何标题/正文。渲染层的问题（右图标
+// 变两颗、行没渲染、令牌失效）只有这里看得见，host 侧无法反推；排障时一次
+// `/archived-sessions/capabilities` 就能拿到现场，不必打开 devtools。
+function dsmCollectUiProbe() {
+  try {
+    if (typeof document === 'undefined') return null
+    const count = (sel) => { try { return document.querySelectorAll(sel).length } catch (e) { return 0 } }
+    const navRow = document.querySelector('[data-dsh-nav-sessions]')
+    const navOwn = navRow ? navRow.querySelectorAll('svg[data-dsm-nav-icon]').length : 0
+    const navIcons = navRow ? navRow.querySelectorAll('svg').length : 0
+    const css = getComputedStyle(document.body || document.documentElement)
+    const token = (name) => String(css.getPropertyValue(name) || '').trim().slice(0, 40)
+    return {
+      navSection: navRow ? 1 : 0,
+      navIcons,
+      navOwn,
+      navFallback: Math.max(0, navIcons - navOwn),
+      navIconRenders: dsmNavIconRenders,
+      sessionRows: count('[role="treeitem"][data-row-key^="session:"]'),
+      workspaceRows: count('[role="treeitem"][data-row-key^="workspace:"]'),
+      overflowRows: count('[data-row-key^="overflow:"]'),
+      stateDots: count('[data-row-key^="session:"] [data-state]'),
+      tokenBgLayer2: token('--dsw-alias-bg-layer-2'),
+      tokenWarn: token('--dsw-alias-state-warn-primary'),
+    }
+  } catch (e) { return null }
+}
 async function dsmLoadCapabilities() {
-  try { dsmCapabilities = await postJSON('/archived-sessions/capabilities', {}) } catch (e) { /* unknown stays safely unavailable */ }
+  try {
+    const body = { menuMode: dsmMenuMode || 'pending' }
+    const probe = dsmCollectUiProbe()
+    if (probe) body.uiProbe = probe
+    dsmCapabilities = await postJSON('/archived-sessions/capabilities', body)
+  } catch (e) { /* unknown stays safely unavailable */ }
   return dsmCapabilities
+}
+function dsmReportMenuMode(mode) {
+  dsmMenuMode = mode
+  dsmLoadCapabilities().catch(() => {})
 }
 function dsmActionCapability(name, legacy) {
   const source = dsmCapabilities && dsmCapabilities.actions
@@ -2905,6 +2981,9 @@ function dsmTeardownSidebarAug() {
       btn.removeAttribute('data-dsm-overflow-write')
       btn.removeAttribute('data-dsm-overflow-ver')
     })
+    // issue #27：隐藏规则在样式表里，必须一并撤掉——否则插件停用后
+    // 「展开其余 N 个会话」会被一条孤儿规则永久藏住，那些会话再也点不开。
+    document.querySelectorAll('[data-dsm-overflow-hide]').forEach((el) => el.remove())
   } catch (e) { /* best-effort */ }
   try {
     document.querySelectorAll('[data-dsm-group-hidden]').forEach((owner) => {
@@ -2977,7 +3056,7 @@ const sidebarAdapter = createSidebarAdapter()
 // apply(ctx) 可能被再次调用（HMR / profile 重载）：用模块级守卫保证观察器、
 // 定时器与 document 级监听器只装一份，绝不叠加（叠加会造成重复提示与后台 CPU 增长）。
 let sidebarMenuAugInstalled = false
-function installSidebarSessionMenuAug(hub) {
+function installSidebarSessionMenuAug(ctx, hub) {
   if (typeof document === 'undefined') return
   if (sidebarMenuAugInstalled) return
   sidebarMenuAugInstalled = true
@@ -3152,6 +3231,151 @@ function installSidebarSessionMenuAug(hub) {
         .catch((e) => toast('删除失败：' + String((e && e.message) || e)))
     })
   }
+  // ── 0.2.2+：官方 contextMenus 数据注册 ────────────────────────────────
+  //
+  // DSH 0.2.2 把会话菜单换成「数据注册 + portal 渲染」：弹层挂在 body 下是一棵
+  // 独立 React 树，fiber 祖先链里没有会话行组件，`props.node.id` 永远取不到 ——
+  // 3.7.10 的 DOM 增强因此在 0.2.2 上完全失效（issue #28）。官方同时给了
+  // `ctx.contextMenus.register({ target: 'session' })`：sessionId 由宿主直接
+  // 给出，菜单项也由宿主渲染，不再依赖任何 DOM 形状。
+  const contextMenuSvc = () => {
+    try { return ctx && typeof ctx.get === 'function' ? ctx.get('contextMenus') : null } catch (e) { return null }
+  }
+  // 移动会话的子菜单要工作区清单。0.2.2-rc.3 的 registry 给每条贡献的 resolve 定了
+  // 预算（Config.resolutionTimeoutMs 默认 1000ms）：超时按失败处理，菜单项会直接
+  // 消失并弹一条失败提示。所以 resolve 一律**同步**只读缓存，绝不在里面等网络：
+  // 缓存空就返回一个 disabled 项，同时在后台预热，下次打开菜单即可用。
+  let menuSnapshot = { at: 0, workspaces: [], sessionPath: new Map() }
+  let menuSnapshotLoading = null
+  const MENU_SNAPSHOT_TTL = 30000
+  const refreshMenuSnapshot = () => {
+    if (menuSnapshotLoading) return menuSnapshotLoading
+    menuSnapshotLoading = (async () => {
+      try {
+        const [ws, sess] = await Promise.all([
+          postJSON('/archived-sessions/workspaces', {}),
+          postJSON('/archived-sessions/sessions', {}),
+        ])
+        const sessionPath = new Map()
+        for (const item of (sess && sess.items) || []) {
+          if (item && item.sessionId != null && typeof item.workspacePath === 'string') {
+            sessionPath.set(String(item.sessionId), item.workspacePath)
+          }
+        }
+        menuSnapshot = { at: Date.now(), workspaces: (ws && ws.items) || [], sessionPath }
+      } catch (e) {
+        // 保留上一份快照：宁可列稍旧的工作区，也不要让「移动会话」整项消失。
+      } finally {
+        menuSnapshotLoading = null
+      }
+      return menuSnapshot
+    })()
+    return menuSnapshotLoading
+  }
+  const warmMenuSnapshot = () => {
+    if (menuSnapshotLoading) return
+    if (Date.now() - menuSnapshot.at < MENU_SNAPSHOT_TTL) return
+    refreshMenuSnapshot().catch(() => {})
+  }
+  // 0.2.2-rc.3 的 registry 对同 (target, id) 的重复注册**直接抛错**，所以本函数
+  // 只能成功进入一次：一次性置位把这个入口变成幂等的（install 自身还有
+  // sidebarMenuAugInstalled 兜底，插件卸载时 ctx.effect 会跑注销函数）。
+  let dataMenusRegistered = false
+  const registerDataMenus = (svc) => {
+    if (dataMenusRegistered) return
+    dataMenusRegistered = true
+    // 官方会话项 order：pin 100 / rename 200 / fork 300 / 复制 ID 450 / 归档 600
+    // （归档带 afterContent，渲染在同级 footer）。标记未读排最前；移动与删除
+    // 同样走 afterContent，按「归档 → 移动 → 删除」的危险度递增顺序排在后面。
+    ctx.effect(() => svc.register({
+      id: 'dsm.mark-unread',
+      target: 'session',
+      order: 50,
+      resolve: ({ sessionId }) => {
+        const id = String(sessionId)
+        const marked = dsmLoadManual().has(id)
+        return [{
+          id: 'toggle',
+          label: marked ? '标记已读' : '标记未读',
+          run: () => { dsmToggleManual(id) },
+        }]
+      },
+    }), 'dsm: mark unread menu')
+    ctx.effect(() => svc.register({
+      id: 'dsm.move-session',
+      target: 'session',
+      order: 700,
+      // 同步 resolve（不返回 Promise）：rc.3 对异步 resolve 有 1s 预算，超时算失败。
+      resolve: ({ sessionId }) => {
+        const id = String(sessionId)
+        const disabled = (reason) => [{
+          id: 'move',
+          label: '移动会话',
+          afterContent: true,
+          disabled: true,
+          ...(reason ? { failureLabel: reason } : {}),
+        }]
+        const cap = dsmActionCapability('relocateSession') || dsmActionCapability('move')
+        if (!cap || !cap.available) return disabled(cap && cap.reason)
+        const snap = menuSnapshot
+        // 快照还没就绪：同步返回 disabled，后台去拿；下一次打开菜单就是完整子菜单。
+        if (!snap.workspaces.length) { warmMenuSnapshot(); return disabled() }
+        // 过期但非空：先用手上这份（工作区很少变），后台刷新供下一次使用。
+        if (Date.now() - snap.at >= MENU_SNAPSHOT_TTL) warmMenuSnapshot()
+        const curPath = snap.sessionPath.get(id) || null
+        return [{
+          id: 'move',
+          label: '移动会话',
+          afterContent: true,
+          children: snap.workspaces.map((w) => {
+            const name = w.title || pathName(w.path) || w.workspaceId
+            const isCur = !!curPath && w.path === curPath
+            return {
+              id: 'ws:' + String(w.path),
+              label: isCur ? name + '（当前）' : name,
+              disabled: isCur,
+              failureLabel: '移动失败',
+              run: async () => {
+                const r = await postActiveAware('/archived-sessions/move', { sessionId: id, targetPath: w.path })
+                // 移动成功后会话归属变了：让下一次打开菜单重新取快照，否则「（当前）」
+                // 仍标在旧工作区上。
+                menuSnapshot = { ...menuSnapshot, at: 0 }
+                // 会话被 DSH 打开时服务端只登记排队：磁盘与工作区分组都没动，
+                // 绝不能报「已移动」（issue #18 的教训位）。
+                if (r && r.queued) {
+                  toast(r.notes && r.notes.length ? r.notes.join(' ') : '会话正被 DSH 打开，已排队待移动；重启 DSH 后会自动完成（请先别打开它）。')
+                  return
+                }
+                toast(r && r.already ? `已在「${name}」` : `已移到「${name}」`)
+              },
+            }
+          }),
+        }]
+      },
+    }), 'dsm: move session menu')
+    ctx.effect(() => svc.register({
+      id: 'dsm.delete-session',
+      target: 'session',
+      order: 800,
+      resolve: ({ sessionId }) => [{
+        id: 'delete',
+        label: '删除会话',
+        afterContent: true,
+        danger: true,
+        run: () => { openDeleteConfirm(String(sessionId)) },
+      }],
+    }), 'dsm: delete session menu')
+  }
+  const activateDataMenus = () => {
+    const svc = contextMenuSvc()
+    if (!svc || typeof svc.register !== 'function' || typeof ctx.effect !== 'function') return false
+    try { registerDataMenus(svc) } catch (e) { return false }
+    // 预热门控：第一次打开 ⋯ 菜单就能直接拿到工作区子菜单，不必等一次往返。
+    warmMenuSnapshot()
+    dsmReportMenuMode('contextMenus')
+    return true
+  }
+
   const augmentMenu = (menuEl, info) => {
     if (menuEl.querySelector('[' + AUG + ']')) return
     const viewport = menuEl.querySelector('[role="presentation"]') || menuEl.firstElementChild
@@ -3167,6 +3391,9 @@ function installSidebarSessionMenuAug(hub) {
     const mk = (label, svg, danger) => {
       const wrap = protoWrap ? protoWrap.cloneNode(false) : document.createElement('div')
       if (protoWrapCls) wrap.className = protoWrapCls
+      // 供 dispose 时整段摘除（0.2.2 上若后来发现 contextMenus 可用，DOM 注入
+      // 需要能干净退出，不能留下第二套菜单项）。
+      wrap.setAttribute(AUG + '-wrap', '')
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.setAttribute('role', 'menuitem')
@@ -3228,6 +3455,11 @@ function installSidebarSessionMenuAug(hub) {
     window.dispatchEvent(new Event('resize'))
   }
 
+  // 0.2.2+ 优先走官方数据注册。拿不到服务时按旧版 DOM 注入，并在服务稍后
+  // 出现时切过去 —— 插件 apply 可能早于 contextMenus 注册完成。
+  if (activateDataMenus()) return () => { sidebarMenuAugInstalled = false }
+  dsmReportMenuMode('dom')
+
   // fork：DSH 0.2.2 的会话菜单 portal 到 body 后，其 fiber 祖先链上已没有带
   // `node` 的组件，sessionInfoFromMenu 恒为 null，「删除 / 移动 / 标记未读」
   // 从未注入。改为记住打开菜单的那一行：按下行内按钮、右键或键盘打开菜单时
@@ -3275,21 +3507,27 @@ function installSidebarSessionMenuAug(hub) {
     })
   }
   const off = hub.on('portal', scanMenus)
-  return () => {
+  let switchTimer = null
+  const disposeDomAug = () => {
     off()
     for (const type of ORIGIN_EVENTS) document.removeEventListener(type, rememberOrigin, listenOpts)
-    sidebarMenuAugInstalled = false
+    if (switchTimer) { clearInterval(switchTimer); switchTimer = null }
+    if (activeSubClose) { try { activeSubClose() } catch (e) {} activeSubClose = null }
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null }
+    try { document.querySelectorAll('[' + AUG + '-wrap]').forEach((el) => el.remove()) } catch (e) {}
+    try { document.querySelectorAll('[' + AUG + ']').forEach((el) => el.remove()) } catch (e) {}
   }
+  let tries = 0
+  switchTimer = setInterval(() => {
+    if (activateDataMenus()) disposeDomAug()
+    else if (++tries >= 20) { clearInterval(switchTimer); switchTimer = null }
+  }, 100)
+  return () => { disposeDomAug(); sidebarMenuAugInstalled = false }
 }
 
-// Left-side per-session status dot (DOM shim). The color is driven by DSH's
-// REAL session status, read from the row's own StateDot ([data-state]):
-//   手动标记未读（蓝） = 用户在 ⋯ 菜单或点击圆点手动标记，localStorage 持久化（最高优先级）
-//   工作中（黄）       = DSH state 'ongoing'（旧版兼容 'running'）
-//   需用户反馈（琥珀） = DSH state 'warning'（有追问需用户反馈）
-//   完成后未读（绿）   = DSH state 'done' 且用户尚未读过（read 集合）
-//   完成已读（不显示） = DSH state 'done' 且已读过（read 集合持久化）
-// 手动未读集合 + read 集合均持久化于 localStorage；打开过即记入 read，绿点不再出现。
+// Left-side per-session status dot (DOM shim).
+// DSH 的 StateDot 原样保留（缓冲圈 / 琥珀 / 绿 / 红都按官方口径），插件只补它
+// 没有的那条语义：手动标记未读（蓝，localStorage 持久化，占同一个状态槽）。
 // 另外：进入回收站的会话会整行隐藏（不出现在「未分组」里）。
 // fork：幂等 DOM 写入。classList.add/remove/toggle 与 setAttribute 即使值不变也会
 // 重写属性并产生 MutationRecord（DOM 规范的 update steps），侧栏观察器因此被自己的
@@ -3317,6 +3555,44 @@ function installSidebarStatusDots(hub) {
   const DSM_OVERFLOW_WRITE = 'data-dsm-overflow-write'
   const DSM_OVERFLOW_VER = 'data-dsm-overflow-ver'
   const DSM_OVERFLOW_HIDDEN = 'data-dsm-overflow-hidden'
+  // issue #27：展开按钮的隐藏改成 CSS 规则驱动。
+  //
+  // 3.7.10 用内联 `style.display='none'` 藏按钮，可按钮是原生 React 托管的节点：
+  // 列表数据一变（标题同步 / 状态刷新 / 水位线调整）React 就重建它，内联样式
+  // 连同 dataset 一起消失、原生旧计数文案回来，MutationObserver 再藏一次 ——
+  // 用户看到的就是「展开其余 N 个会话」在显示与隐藏之间振荡。
+  // 改成按 row-key 生成一条全局规则：节点被重建多少次，只要 key 相同就立刻
+  // 命中，不再和 React 抢同一个 style 属性。
+  let overflowHideStyle = null
+  const overflowHiddenKeys = new Set()
+  const flushOverflowHide = () => {
+    if (!overflowHiddenKeys.size) {
+      if (overflowHideStyle && overflowHideStyle.parentNode) overflowHideStyle.parentNode.removeChild(overflowHideStyle)
+      overflowHideStyle = null
+      return
+    }
+    if (!overflowHideStyle) {
+      overflowHideStyle = document.createElement('style')
+      overflowHideStyle.setAttribute('data-dsm-overflow-hide', '')
+      document.head.appendChild(overflowHideStyle)
+    }
+    const selectors = [...overflowHiddenKeys].map((k) => '[data-row-key="overflow:' + String(k).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]')
+    const css = selectors.join(',') + '{display:none!important}'
+    if (overflowHideStyle.textContent !== css) overflowHideStyle.textContent = css
+  }
+  const setOverflowHidden = (btn, hidden) => {
+    const key = (btn.getAttribute('data-row-key') || '').slice('overflow:'.length)
+    if (key) {
+      if (hidden) overflowHiddenKeys.add(key)
+      else overflowHiddenKeys.delete(key)
+    }
+    if (hidden) {
+      if (!btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) btn.setAttribute(DSM_OVERFLOW_HIDDEN, '')
+    } else if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
+      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
+    }
+    if (key) flushOverflowHide()
+  }
   let overflowDebugged = false
   const debugOverflowOnce = (msg) => {
     if (overflowDebugged) return
@@ -3340,20 +3616,6 @@ function installSidebarStatusDots(hub) {
     const sel = document.querySelector('[role="treeitem"][aria-selected="true"]')
     return sel ? rowId(sel) : null
   }
-  // Dot colors per the user's scheme. We read DSH's REAL session status from the
-  // row's own StateDot (its [data-state] attr) and recolor it:
-  //   ongoing/running → 黄  工作中
-  //   warning  → 琥珀 有追问需用户反馈
-  //   done     → 绿  完成后未读（读过则不再显示）
-  //   error    → 红  出错/需关注（与 DSH 自带 StateDot 一致）
-  //   (manual  → 蓝  手动标记未读，最高优先级)
-  const COLOR = {
-    manual: 'var(--dsw-alias-state-business-primary)',        // 蓝 手动标记未读
-    running: '#EAB308',                                       // 黄 工作中 (DSH running)
-    feedback: 'var(--dsw-alias-state-warn-primary, #F59E0B)', // 琥珀 需用户反馈 (DSH warning)
-    done: 'var(--dsw-alias-state-success-primary)',           // 绿 完成后未读 (DSH done)
-    error: 'var(--dsw-alias-state-error-primary)',            // 红 出错/需关注 (DSH error)
-  }
   const manualUnread = dsmLoadManual()
   // v3.6.2 #2：原 WeakSet「首绘一次即终身免改」升级为 WeakMap 所有权记录
   // row → { id, text, authoritative }。权威标题**后到**时回填仍由我们持有文本的
@@ -3370,9 +3632,9 @@ function installSidebarStatusDots(hub) {
   // 本组的会话行与展开按钮都是这个容器的子节点。
   //
   // 判定走数据层（与展开计数同一口径）：只有 group.sessions 里「非空白、且
-  // 不在回收站/墓碑/空白集合」的条数确实为 0 才藏。只看 DOM 会把「上游折叠
-  // 后还没渲染出来的可见会话」误判成空组，连标题带展开按钮一起藏掉——那些
-  // 会话就再也点不到了。
+  // 不在回收站/墓碑/被插件藏起来的空白行」的条数确实为 0 才藏。只看 DOM 会把
+  // 「上游折叠后还没渲染出来的可见会话」误判成空组，连标题带展开按钮一起藏掉
+  // ——那些会话就再也点不到了。
   //
   // 原 display 记在容器的 dataset 上（而不是 WeakMap）：还原路径无法遍历
   // WeakMap，dataset 让「谁被我们藏过、原来是什么」随时可查可还原。
@@ -3454,12 +3716,14 @@ function installSidebarStatusDots(hub) {
     }
     return null
   }
-  function dsmSyncEmptyGroups(purgedNow) {
+  function dsmSyncEmptyGroups(purgedNow, activeId) {
     let rows = null
     try { rows = document.querySelectorAll('[role="treeitem"][data-row-key^="workspace:"]') } catch (e) { return }
     if (!rows || !rows.length) return
     const purged = purgedNow instanceof Set ? purgedNow : new Set()
     // 被插件藏起来的 id 集合只在真的需要判定时建一次（绝大多数帧用不到）。
+    // 3.8.1：空白行里**当前会话那一条不藏**（与上游 sessionVisible 同口径），
+    // 所以它也不能进这份"会被扣掉"的集合——否则活会话数被扣成 0，整组消失。
     let hiddenIds = null
     const hiddenIdSet = () => {
       if (hiddenIds) return hiddenIds
@@ -3499,7 +3763,13 @@ function installSidebarStatusDots(hub) {
         // 拿不到 group.sessions / 数组为空 = 不知道 → 按非空处理，保持显示。
         const group = sidebarAdapter.recognizeGroupQuiet(row)
         const sessions = group && Array.isArray(group.sessions) ? group.sessions : null
-        setGroupHidden(scope, aliveSessionCount(sessions, hiddenIdSet()) === 0)
+        // 当前会话就在本组时绝不藏（见 shouldHideEmptyGroup）：上游只渲染「当前会话」
+        // 那一条 blank 行，插件又把 blank 行一律隐藏，于是组内可见数为 0；
+        // 若照旧按 aliveSessionCount 判空，会把用户正在用的工作区连标题和「+」一起藏掉。
+        setGroupHidden(scope, shouldHideEmptyGroup(
+          aliveSessionCount(sessions, hiddenIdSet()),
+          group !== null && group.containsCurrent === true,
+        ))
       } catch (e) { /* 单组失败不影响其它组 */ }
     })
   }
@@ -3516,7 +3786,8 @@ function installSidebarStatusDots(hub) {
   // （上游只有这一个展开入口 → 会话不可达）。这里改用
   //   还能出现几行 = 本组可见总数（非 blank、且不会被插件藏）- 已渲染可见行数
   // 空白行两边都排除（F2）：上游 watermarkRows 里 `if (session.blank) return true`
-  // —— 空白行永远保留、从不计入 N。
+  // —— 空白行永远保留、从不计入 N；插件这层同样排除空白行，唯一例外是当前会话
+  // 那一条（3.8.1，与上游 sessionVisible 同口径）。
   //
   // 数据层拿不到 group.sessions 时**什么都不改**（F6）：DOM 兜底在数学上不成立，
   // 写一个看起来合理却会算错的数比不改更糟。
@@ -3538,7 +3809,7 @@ function installSidebarStatusDots(hub) {
     return n + '|' + firstKey + '|' + lastKey + '|' + (btn.textContent || '') + '|' + (btn.style.display || '') +
       '|' + (dsmTrashIds ? dsmTrashIds.size : -1) + '|' + purgedNow.size + '|' + dsmLineage.size
   }
-  function dsmSyncOverflowLabels(purgedNow) {
+  function dsmSyncOverflowLabels(purgedNow, activeId) {
     let buttons = null
     try { buttons = document.querySelectorAll('[data-row-key^="overflow:"]') } catch (e) { return }
     if (!buttons || !buttons.length) return
@@ -3583,6 +3854,9 @@ function installSidebarStatusDots(hub) {
         const groupCount = group && typeof group.sessionCount === 'number' ? group.sessionCount : null
         const collapsed = !nodes.length && groupCount != null && groupCount > 0
         // 本组「上游会列出、且不会被插件藏起来」的会话集合。
+        // 空白行按上游口径排除（watermarkRows 里 `if (session.blank) return true`）；
+        // 另外排除插件自己会藏掉的空白行——当前会话那一条不藏（与上游同口径），
+        // 所以要单独放行，否则本组可见集会算成空、按钮永远不校准。
         const ids = new Set()
         for (const node of (nodes && nodes.length ? nodes : [])) {
           if (!node || node.blank) continue
@@ -3675,15 +3949,11 @@ function installSidebarStatusDots(hub) {
     }
     const plan = overflowPlan(baseline, more)
     if (plan.hide) {
-      if (btn.style.display !== 'none') btn.style.display = 'none'
-      if (!btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) btn.setAttribute(DSM_OVERFLOW_HIDDEN, '')
+      setOverflowHidden(btn, true)
       btn.setAttribute(DSM_OVERFLOW_WRITE, baseline)
       return
     }
-    if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
-      btn.style.display = ''
-      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
-    }
+    setOverflowHidden(btn, false)
     if (plan.changed) {
       // 同值不写：写入会触发 characterData 观察 → 重绘，必须保持幂等。
       if (btn.textContent !== plan.text) btn.textContent = plan.text
@@ -3696,10 +3966,7 @@ function installSidebarStatusDots(hub) {
   function restoreOverflowButton(btn) {
     const verbatim = btn.getAttribute(DSM_OVERFLOW_BASE)
     if (verbatim != null && btn.textContent !== verbatim) btn.textContent = verbatim
-    if (btn.hasAttribute(DSM_OVERFLOW_HIDDEN)) {
-      btn.style.display = ''
-      btn.removeAttribute(DSM_OVERFLOW_HIDDEN)
-    }
+    setOverflowHidden(btn, false)
   }
   const paint = () => {
     if (sidebarAdapter.disabled) return
@@ -3755,10 +4022,16 @@ function installSidebarStatusDots(hub) {
         return
       }
       // ---- 血缘分层披露（issue #6）--------------------------------------
-      // 优先级：回收站/墓碑隐藏 > 纯净视图隐藏（仅空白行） > 原生显示。
+      // 优先级：回收站/墓碑隐藏 > 空白行隐藏（当前会话除外） > 原生显示。
       // 子代理行按 DSH 设计不进侧栏（ui-subagent README 明文）；万一上游
       // 改回渲染，这里只做缩进视觉、绝不隐藏——侧栏没有展开入口，藏了
       // 就再也找不回来。
+      // 空白行仍要藏，但**当前会话除外**（3.8.1）：上游 sessionVisible() 只过滤
+      // `blank && id !== current`，而服务端对没有投影缓存记录的冷会话按
+      // `blank ?? false` 处理——也就是「不知道」会被当成非空渲染出来。插件这层
+      // 规则覆盖的正是这批会话；把当前会话一起藏掉则是 issue #21「整组消失」
+      // 的另一半（用户刚点「新建」的那条对话看不见）。两边口径对齐后，
+      // 「藏哪些行」与「计数扣哪些行」才是同一份事实。
       const li = dsmLineage.get(id)
       const isSub = !!(li && li.origin === 'subagent')
       const isEmpty = !!(li && li.empty)
@@ -3789,8 +4062,8 @@ function installSidebarStatusDots(hub) {
         return
       }
       if (row.style.display === 'none') row.style.display = ''
-      // 行重新可见（已从回收站恢复 / 空白状态消失）：摘掉隐藏标记，展开计数
-      // 立刻把这一条还回「可展开」的数量里。
+      // 行重新可见（已从回收站恢复 / 空白状态消失 / 成为当前会话）：摘掉隐藏
+      // 标记，展开计数立刻把这一条还回「可展开」的数量里。
       if (row.hasAttribute(DSM_HIDDEN_ATTR)) row.removeAttribute(DSM_HIDDEN_ATTR)
       if (!isEmpty && li && li.parentSession && li.origin !== 'subagent') {
         // fork 分支行：绿「⑂ 分支」chip，点击滚动并高亮父会话行。
@@ -3903,33 +4176,37 @@ function installSidebarStatusDots(hub) {
           }
         }
       }
-      // Read DSH's REAL session status from the row's own StateDot and recolor
-      // it with the user's scheme (we also hide DSH's dot so only ours shows).
+      // DSH 的状态点原样交回；只有手动标记未读时，插件用蓝点占住同一个状态槽。
       const sd = row.querySelector('[data-state]')
-      if (sd) sd.style.display = 'none'
-      let dot = row.querySelector('[' + DOT + ']')
-      const state = dotStateFor({ manualUnread: manualUnread.has(id), dataState: sd ? sd.getAttribute('data-state') : '', isActive: activeId === id })
-      const color = state ? COLOR[state] : null
-      if (!color) { if (dot) dot.remove(); return }
-      if (!dot) {
-        dot = document.createElement('span')
-        dot.setAttribute(DOT, '')
-        dot.className = 'dsm-dot'
-        if (!row.hasAttribute('data-dsm-pos')) {
-          if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
-          row.setAttribute('data-dsm-pos', '')
+      const own = row.querySelector('[' + DOT + ']')
+      if (manualUnread.has(id)) {
+        if (sd && sd.style.display !== 'none') sd.style.display = 'none'
+        if (!own) {
+          const dot = document.createElement('span')
+          dot.setAttribute(DOT, '')
+          dot.className = 'dsm-dot dsm-dot-manual'
+          dot.title = '已手动标记未读（点击取消）'
+          dot.setAttribute('aria-label', dot.title)
+          if (!row.hasAttribute('data-dsm-pos')) {
+            if (getComputedStyle(row).position === 'static') row.style.position = 'relative'
+            row.setAttribute('data-dsm-pos', '')
+          }
+          dot.addEventListener('click', (e) => {
+            e.stopPropagation(); e.preventDefault()
+            dsmToggleManual(id)
+          })
+          row.insertBefore(dot, row.firstChild)
         }
-        dot.addEventListener('click', (e) => {
-          e.stopPropagation(); e.preventDefault()
-          dsmToggleManual(id)
-        })
-        row.insertBefore(dot, row.firstChild)
+      } else {
+        if (own) own.remove()
+        // 只在确实被我们藏过时才恢复：每帧重写 style 会命中 MutationObserver 自己的
+        // attributeFilter('style')，导致每帧重绘一次。
+        if (sd && sd.style.display === 'none') sd.style.display = ''
       }
-      dot.style.background = color
     })
-    dsmSyncEmptyGroups(purgedNow)
+    dsmSyncEmptyGroups(purgedNow, activeId)
     // issue #16：等隐藏标记落定后再校准展开计数（数据层优先，DOM 标记兜底）。
-    dsmSyncOverflowLabels(purgedNow)
+    dsmSyncOverflowLabels(purgedNow, activeId)
   }
   dsmRepaintDots = paint
   const paintToast = (msg, kind) => {
@@ -4458,7 +4735,7 @@ function installSidebarDragAutoScroll() {
 // fork：所有 DOM 垫片挂在同一个共享 hub 上；订阅完再启动，首帧即可全部跑一遍。
 function installDomShims(ctx, hub) {
   installSettingsNavIcons(ctx, hub)
-  const disposeMenuAug = installSidebarSessionMenuAug(hub)
+  const disposeMenuAug = installSidebarSessionMenuAug(ctx, hub)
   if (disposeMenuAug) ctx.effect(() => disposeMenuAug)
   // 侧栏增强的卸载清退挂到 cordis effect：插件停用/HMR 时 interval、
   // 订阅与全部注入 DOM 一并回收（否则泄漏到页面关闭）。
@@ -4506,7 +4783,25 @@ export function apply(ctx) {
     ctx.effect(() => () => hub.dispose())
     installDomShims(ctx, hub)
   }
+  // 首拍（apply 当刻）DOM 还没渲染，界面自证只能是空的。这里在两次「已经能看见
+  // 侧栏」的时点重报一次，host 侧 /capabilities 才能反映真实渲染结果。
+  for (const delay of [2500, 9000]) {
+    const timer = setTimeout(() => { dsmLoadCapabilities().catch(() => {}) }, delay)
+    if (typeof timer.unref === 'function') timer.unref()
+    ctx.effect(() => () => clearTimeout(timer))
+  }
   const workspacesSvc = ctx.get('workspaces')
+  // 设置左导航图标：id 必须与下面 `settings.section` 的贡献一致，外壳按 id 配对
+  // （`renderSlot('settings.section.icon', ..., { only: row.id, fallback: navIcon(id) })`）。
+  // 配对成功后 fallback 的齿轮不再渲染，行里只剩我们这一颗。
+  // 0.2.2 之前没有声明该槽：`slots.inject` 会一直等声明、不执行回调，旧壳自动
+  // 落回 NAV_CSS 的遮罩路径，不需要额外分支。
+  ctx.slots.inject('settings.section.icon', () =>
+    ctx.slots.register(
+      { name: 'settings.section.icon', id: 'session-manager' },
+      (props) => <ArchiveBoxIcon {...props} />,
+    ),
+  )
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       { name: 'settings.section', id: 'session-manager', order: 90, label: '会话管理' },
